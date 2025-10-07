@@ -85,12 +85,13 @@ func (l *UDPListener) forward(packet []byte, dest *relay.Endpoint) {
 	switch dest.Type {
 	case relay.EndpointUDP:
 		if dest.UDPAddr != nil {
-			l.conn.WriteToUDP(packet, dest.UDPAddr)
+			_, _ = l.conn.WriteToUDP(packet, dest.UDPAddr)
 		}
-	case relay.EndpointWebSocket:
-		if dest.WSConn != nil {
-			// TODO: Send via WebSocket
-			// Will implement when we add WebSocket support
+	case relay.EndpointStream:
+		if dest.StreamConn != nil {
+			// TODO: Send via HTTPS stream
+			// Will implement when we add HTTPS stream support
+			_ = dest.StreamConn // noop
 		}
 	}
 }

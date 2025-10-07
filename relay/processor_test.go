@@ -187,13 +187,13 @@ func TestProcessorEndpointUpdate(t *testing.T) {
 	endpoint1 := NewUDPEndpoint(addr1)
 
 	initiationPacket := makeInitiationPacket(12345)
-	processor.ProcessPacket(initiationPacket, endpoint1)
+	_, _ = processor.ProcessPacket(initiationPacket, endpoint1)
 
 	// Peer roams to new location
 	addr2 := &net.UDPAddr{IP: net.IPv4(10, 0, 0, 2), Port: 51821}
 	endpoint2 := NewUDPEndpoint(addr2)
 
-	processor.ProcessPacket(initiationPacket, endpoint2)
+	_, _ = processor.ProcessPacket(initiationPacket, endpoint2)
 
 	// Should have updated to new endpoint
 	registered := registry.Lookup(12345)

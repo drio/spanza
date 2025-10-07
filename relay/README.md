@@ -12,7 +12,7 @@ Tracks WireGuard peers and determines packet forwarding destinations.
 **Processor** - Learns peer endpoints from packets
 - `ProcessPacket(data, source)` - Parse packet, learn sender, return destination
 
-**Endpoint** - Peer's network location (UDP address or WebSocket connection)
+**Endpoint** - Peer's network location (UDP address or HTTPS stream)
 
 ## How It Works
 

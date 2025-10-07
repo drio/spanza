@@ -2,10 +2,9 @@ package relay
 
 import (
 	"fmt"
+	"io"
 	"net"
 	"time"
-
-	"github.com/coder/websocket"
 )
 
 // EndpointType represents the type of network endpoint
@@ -13,15 +12,15 @@ type EndpointType int
 
 const (
 	EndpointUDP EndpointType = iota
-	EndpointWebSocket
+	EndpointStream
 )
 
 func (et EndpointType) String() string {
 	switch et {
 	case EndpointUDP:
 		return "UDP"
-	case EndpointWebSocket:
-		return "WebSocket"
+	case EndpointStream:
+		return "Stream"
 	default:
 		return "Unknown"
 	}
@@ -32,9 +31,9 @@ type Endpoint struct {
 	Type EndpointType
 	// For UDP endpoints
 	UDPAddr *net.UDPAddr
-	// For WebSocket endpoints
-	WSConn   *websocket.Conn
-	WSRemote string // Remote address string for WebSocket
+	// For HTTPS stream endpoints (HTTP Upgrade)
+	StreamConn   io.ReadWriteCloser
+	StreamRemote string // Remote address string for stream
 	// Last time this endpoint was seen
 	LastSeen time.Time
 }
@@ -48,13 +47,13 @@ func NewUDPEndpoint(addr *net.UDPAddr) *Endpoint {
 	}
 }
 
-// NewWebSocketEndpoint creates an endpoint for a WebSocket connection
-func NewWebSocketEndpoint(conn *websocket.Conn, remoteAddr string) *Endpoint {
+// NewStreamEndpoint creates an endpoint for an HTTPS stream connection
+func NewStreamEndpoint(conn io.ReadWriteCloser, remoteAddr string) *Endpoint {
 	return &Endpoint{
-		Type:     EndpointWebSocket,
-		WSConn:   conn,
-		WSRemote: remoteAddr,
-		LastSeen: time.Now(),
+		Type:         EndpointStream,
+		StreamConn:   conn,
+		StreamRemote: remoteAddr,
+		LastSeen:     time.Now(),
 	}
 }
 
@@ -66,11 +65,11 @@ func (e *Endpoint) String() string {
 			return fmt.Sprintf("UDP:%s", e.UDPAddr.String())
 		}
 		return "UDP:<nil>"
-	case EndpointWebSocket:
-		if e.WSRemote != "" {
-			return fmt.Sprintf("WS:%s", e.WSRemote)
+	case EndpointStream:
+		if e.StreamRemote != "" {
+			return fmt.Sprintf("Stream:%s", e.StreamRemote)
 		}
-		return "WS:<nil>"
+		return "Stream:<nil>"
 	default:
 		return "Unknown"
 	}
@@ -89,8 +88,8 @@ func (e *Endpoint) Equal(other *Endpoint) bool {
 		return e.UDPAddr != nil && other.UDPAddr != nil &&
 			e.UDPAddr.IP.Equal(other.UDPAddr.IP) &&
 			e.UDPAddr.Port == other.UDPAddr.Port
-	case EndpointWebSocket:
-		return e.WSRemote == other.WSRemote
+	case EndpointStream:
+		return e.StreamRemote == other.StreamRemote
 	default:
 		return false
 	}
