@@ -1,0 +1,125 @@
+package main
+
+import (
+	"context"
+	"errors"
+	"flag"
+	"fmt"
+	"os"
+
+	"github.com/peterbourgon/ff/v3/ffcli"
+)
+
+const version = "0.1.0"
+
+func main() {
+	if err := run(os.Args[1:]); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+func run(args []string) error {
+	rootCmd := newRootCmd()
+	if err := rootCmd.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
+		return err
+	}
+	return rootCmd.Run(context.Background())
+}
+
+func newRootCmd() *ffcli.Command {
+	rootfs := flag.NewFlagSet("spanza", flag.ExitOnError)
+
+	return &ffcli.Command{
+		Name:       "spanza",
+		ShortUsage: "spanza <subcommand> [flags]",
+		ShortHelp:  "WireGuard relay tool for NAT traversal",
+		LongHelp: `spanza is a relay tool that forwards WireGuard packets over WebSocket/TLS
+to enable peer communication when UDP traffic is blocked.`,
+		Subcommands: []*ffcli.Command{
+			newServerCmd(),
+			newClientCmd(),
+			newVersionCmd(),
+		},
+		FlagSet: rootfs,
+		Exec: func(ctx context.Context, args []string) error {
+			return flag.ErrHelp
+		},
+	}
+}
+
+func newServerCmd() *ffcli.Command {
+	fs := flag.NewFlagSet("spanza server", flag.ExitOnError)
+	udpAddr := fs.String("udp-addr", ":51820", "UDP listen address")
+	wsAddr := fs.String("ws-addr", ":8443", "WebSocket/TLS listen address")
+	certFile := fs.String("cert", "cert.pem", "TLS certificate file")
+	keyFile := fs.String("key", "key.pem", "TLS key file")
+
+	return &ffcli.Command{
+		Name:       "server",
+		ShortUsage: "spanza server [flags]",
+		ShortHelp:  "Run in server mode",
+		LongHelp: `Run spanza in server mode. The server binds to UDP and TCP/WebSocket ports,
+inspects incoming WireGuard packets, and relays them to the appropriate peer.`,
+		FlagSet: fs,
+		Exec: func(ctx context.Context, args []string) error {
+			return runServer(ctx, *udpAddr, *wsAddr, *certFile, *keyFile)
+		},
+	}
+}
+
+func newClientCmd() *ffcli.Command {
+	fs := flag.NewFlagSet("spanza client", flag.ExitOnError)
+	listenAddr := fs.String("listen", ":51820", "UDP listen address")
+	serverURL := fs.String("server", "wss://localhost:8443", "WebSocket server URL")
+	insecure := fs.Bool("insecure", false, "Skip TLS certificate verification")
+
+	return &ffcli.Command{
+		Name:       "client",
+		ShortUsage: "spanza client [flags]",
+		ShortHelp:  "Run in client (sidecar) mode",
+		LongHelp: `Run spanza in client mode. The client listens on a UDP port and forwards
+WireGuard packets to the server over WebSocket/TLS.`,
+		FlagSet: fs,
+		Exec: func(ctx context.Context, args []string) error {
+			return runClient(ctx, *listenAddr, *serverURL, *insecure)
+		},
+	}
+}
+
+func newVersionCmd() *ffcli.Command {
+	return &ffcli.Command{
+		Name:       "version",
+		ShortUsage: "spanza version",
+		ShortHelp:  "Print version information",
+		Exec: func(ctx context.Context, args []string) error {
+			fmt.Printf("spanza v%s\n", version)
+			fmt.Printf("WireGuard relay tool for NAT traversal\n")
+			return nil
+		},
+	}
+}
+
+func runServer(ctx context.Context, udpAddr, wsAddr, certFile, keyFile string) error {
+	fmt.Printf("Starting server mode...\n")
+	fmt.Printf("  UDP address: %s\n", udpAddr)
+	fmt.Printf("  WebSocket address: %s\n", wsAddr)
+	fmt.Printf("  TLS cert: %s\n", certFile)
+	fmt.Printf("  TLS key: %s\n", keyFile)
+
+	// TODO: Implement server logic
+	return fmt.Errorf("server mode not yet implemented")
+}
+
+func runClient(ctx context.Context, listenAddr, serverURL string, insecure bool) error {
+	fmt.Printf("Starting client mode...\n")
+	fmt.Printf("  Listen address: %s\n", listenAddr)
+	fmt.Printf("  Server URL: %s\n", serverURL)
+	fmt.Printf("  Insecure TLS: %v\n", insecure)
+
+	// TODO: Implement client logic
+	return fmt.Errorf("client mode not yet implemented")
+}
