@@ -27,7 +27,7 @@ func TestWireGuardDirect(t *testing.T) {
 	// Start server peer
 	go func() {
 		tnet := startServerPeer(t)
-		startHTTPServer(t, tnet, serverReady)
+		startHTTPServerDirect(t, tnet, serverReady)
 	}()
 
 	// Wait for server to be ready
@@ -108,8 +108,8 @@ endpoint=127.0.0.1:51822
 	return tnet
 }
 
-// startHTTPServer starts an HTTP server on the given network stack
-func startHTTPServer(t *testing.T, tnet *netstack.Net, ready chan struct{}) {
+// startHTTPServerDirect starts an HTTP server on the given network stack
+func startHTTPServerDirect(t *testing.T, tnet *netstack.Net, ready chan struct{}) {
 	t.Helper()
 
 	listener, err := tnet.ListenTCP(&net.TCPAddr{Port: 80})
@@ -117,7 +117,8 @@ func startHTTPServer(t *testing.T, tnet *netstack.Net, ready chan struct{}) {
 		t.Fatalf("Failed to listen on :80: %v", err)
 	}
 
-	http.HandleFunc("/test", func(w http.ResponseWriter, r *http.Request) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/test", func(w http.ResponseWriter, r *http.Request) {
 		t.Logf("[server] Request from %s", r.RemoteAddr)
 		io.WriteString(w, "pong from WireGuard server")
 	})
@@ -128,7 +129,7 @@ func startHTTPServer(t *testing.T, tnet *netstack.Net, ready chan struct{}) {
 	close(ready)
 
 	// Serve (blocks)
-	srv := &http.Server{}
+	srv := &http.Server{Handler: mux}
 	go func() {
 		time.Sleep(10 * time.Second)
 		srv.Close()
