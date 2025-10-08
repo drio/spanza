@@ -9,6 +9,7 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/drio/spanza/client"
 	"github.com/drio/spanza/relay"
 	"github.com/drio/spanza/server"
 	"github.com/peterbourgon/ff/v3/ffcli"
@@ -78,18 +79,17 @@ inspects incoming WireGuard packets, and relays them to the appropriate peer.`,
 func newClientCmd() *ffcli.Command {
 	fs := flag.NewFlagSet("spanza client", flag.ExitOnError)
 	listenAddr := fs.String("listen", ":51820", "UDP listen address")
-	serverURL := fs.String("server", "wss://localhost:8443", "WebSocket server URL")
-	insecure := fs.Bool("insecure", false, "Skip TLS certificate verification")
+	serverAddr := fs.String("server", "localhost:51820", "Server UDP address")
 
 	return &ffcli.Command{
 		Name:       "client",
 		ShortUsage: "spanza client [flags]",
 		ShortHelp:  "Run in client (sidecar) mode",
 		LongHelp: `Run spanza in client mode. The client listens on a UDP port and forwards
-WireGuard packets to the server over WebSocket/TLS.`,
+WireGuard packets to the server over UDP.`,
 		FlagSet: fs,
 		Exec: func(ctx context.Context, args []string) error {
-			return runClient(ctx, *listenAddr, *serverURL, *insecure)
+			return runClient(ctx, *listenAddr, *serverAddr)
 		},
 	}
 }
@@ -144,12 +144,35 @@ func runServer(ctx context.Context, udpAddr, wsAddr, certFile, keyFile string) e
 	return nil
 }
 
-func runClient(ctx context.Context, listenAddr, serverURL string, insecure bool) error {
+func runClient(ctx context.Context, listenAddr, serverAddr string) error {
 	fmt.Printf("Starting client mode...\n")
 	fmt.Printf("  Listen address: %s\n", listenAddr)
-	fmt.Printf("  Server URL: %s\n", serverURL)
-	fmt.Printf("  Insecure TLS: %v\n", insecure)
+	fmt.Printf("  Server address: %s\n", serverAddr)
 
-	// TODO: Implement client logic
-	return fmt.Errorf("client mode not yet implemented")
+	// Create client configuration
+	cfg := &client.ClientConfig{
+		ListenAddr: listenAddr,
+		ServerAddr: serverAddr,
+	}
+
+	// Create client
+	c, err := client.NewClient(cfg)
+	if err != nil {
+		return fmt.Errorf("failed to create client: %w", err)
+	}
+	defer c.Close()
+
+	// Set up signal handling for graceful shutdown
+	ctx, cancel := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+
+	fmt.Printf("Client running. Press Ctrl+C to stop.\n")
+
+	// Run client (blocks until context cancelled or error)
+	if err := c.Run(ctx); err != nil && err != context.Canceled {
+		return fmt.Errorf("client error: %w", err)
+	}
+
+	fmt.Printf("Client stopped.\n")
+	return nil
 }
