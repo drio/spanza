@@ -1,6 +1,6 @@
 # Makefile for spanza - WireGuard relay tool
 
-.PHONY: all build test test-race test-coverage clean run fmt vet lint security gosec vulncheck check help install-lint-tools install-security-tools
+.PHONY: all build test test-race test-coverage test-integration clean run fmt vet lint security gosec vulncheck check help install-lint-tools install-security-tools
 
 # Default target
 all: help
@@ -24,6 +24,11 @@ test-coverage:
 test-race:
 	@echo "Running tests with race detector..."
 	go test -race ./...
+
+# Run integration tests
+test-integration:
+	@echo "Running integration tests..."
+	go test -v -tags=integration ./test
 
 # Clean build artifacts
 clean:
@@ -82,17 +87,18 @@ check: fmt vet lint test test-race security
 # Show available targets
 help:
 	@echo "Available targets:"
-	@echo "  build         - Build the spanza binary"
-	@echo "  test          - Run all tests"
-	@echo "  test-coverage - Run tests with coverage"
-	@echo "  test-race     - Run tests with race detector"
-	@echo "  clean         - Clean build artifacts"
-	@echo "  run           - Build and run spanza"
-	@echo "  fmt           - Format Go code"
-	@echo "  vet           - Run go vet"
-	@echo "  lint          - Run golangci-lint"
-	@echo "  gosec         - Run gosec security scanner"
-	@echo "  vulncheck     - Run vulnerability scanner"
-	@echo "  security      - Run all security checks"
-	@echo "  check         - Run fmt, vet, lint, test, test-race, and security"
-	@echo "  help          - Show this help message"
+	@echo "  build            - Build the spanza binary"
+	@echo "  test             - Run all unit tests"
+	@echo "  test-coverage    - Run tests with coverage"
+	@echo "  test-race        - Run tests with race detector"
+	@echo "  test-integration - Run integration tests (requires -tags=integration)"
+	@echo "  clean            - Clean build artifacts"
+	@echo "  run              - Build and run spanza"
+	@echo "  fmt              - Format Go code"
+	@echo "  vet              - Run go vet"
+	@echo "  lint             - Run golangci-lint"
+	@echo "  gosec            - Run gosec security scanner"
+	@echo "  vulncheck        - Run vulnerability scanner"
+	@echo "  security         - Run all security checks"
+	@echo "  check            - Run fmt, vet, lint, test, test-race, and security"
+	@echo "  help             - Show this help message"
