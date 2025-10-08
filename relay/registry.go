@@ -48,3 +48,38 @@ func (r *Registry) Count() int {
 	defer r.mu.RUnlock()
 	return len(r.peers)
 }
+
+// GetAllExcept returns all registered endpoints except the given source endpoint.
+// Used for broadcasting handshake initiation packets to all peers except sender.
+func (r *Registry) GetAllExcept(source *Endpoint) []*Endpoint {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	result := make([]*Endpoint, 0, len(r.peers))
+	for _, endpoint := range r.peers {
+		// Skip if this is the source endpoint (compare addresses)
+		if !endpointsEqual(endpoint, source) {
+			result = append(result, endpoint)
+		}
+	}
+	return result
+}
+
+// endpointsEqual checks if two endpoints refer to the same address
+func endpointsEqual(a, b *Endpoint) bool {
+	if a.Type != b.Type {
+		return false
+	}
+
+	if a.Type == EndpointUDP && b.Type == EndpointUDP {
+		return a.UDPAddr != nil && b.UDPAddr != nil &&
+		       a.UDPAddr.String() == b.UDPAddr.String()
+	}
+
+	// For stream endpoints, compare remote addresses if available
+	if a.Type == EndpointStream && b.Type == EndpointStream {
+		return a.StreamRemote == b.StreamRemote
+	}
+
+	return false
+}

@@ -99,13 +99,12 @@ func startServerPeerViaRelay(t *testing.T) *netstack.Net {
 	}
 
 	dev := device.NewDevice(tun, conn.NewDefaultBind(), device.NewLogger(device.LogLevelSilent, ""))
-	// Peer2 connects to relay server - both peers point to the relay
+	// Peer2 uses ephemeral port, sends initiations to relay
 	err = dev.IpcSet(`private_key=003ed5d73b55806c30de3f8a7bdab38af13539220533055e635690b8b87ad641
-listen_port=51822
 public_key=f928d4f6c1b86c12f2562c10b07c555c5c57fd00f59e90c8d8d88767271cbf7c
 allowed_ip=192.168.4.1/32
 endpoint=127.0.0.1:51820
-persistent_keepalive_interval=25
+persistent_keepalive_interval=1
 `)
 	if err != nil {
 		t.Fatalf("Failed to configure server device: %v", err)
@@ -115,7 +114,7 @@ persistent_keepalive_interval=25
 		t.Fatalf("Failed to bring up server device: %v", err)
 	}
 
-	t.Log("[peer2] WireGuard interface up, listen_port=51822, endpoint=127.0.0.1:51820 (relay server)")
+	t.Log("[peer2] WireGuard interface up, ephemeral port, endpoint=127.0.0.1:51820")
 	return tnet
 }
 
@@ -133,11 +132,12 @@ func startClientPeerViaRelay(t *testing.T) *netstack.Net {
 	}
 
 	dev := device.NewDevice(tun, conn.NewDefaultBind(), device.NewLogger(device.LogLevelSilent, ""))
-	// Peer1 connects directly to relay server on port 51820
+	// Peer1 uses ephemeral port, sends initiations to relay
 	err = dev.IpcSet(`private_key=087ec6e14bbed210e7215cdc73468dfa23f080a1bfb8665b2fd809bd99d28379
 public_key=c4c8e984c5322c8184c72265b92b250fdb63688705f504ba003c88f03393cf28
 allowed_ip=0.0.0.0/0
 endpoint=127.0.0.1:51820
+persistent_keepalive_interval=1
 `)
 	if err != nil {
 		t.Fatalf("Failed to configure client device: %v", err)
@@ -147,7 +147,7 @@ endpoint=127.0.0.1:51820
 		t.Fatalf("Failed to bring up client device: %v", err)
 	}
 
-	t.Log("[peer1] WireGuard interface up, endpoint=127.0.0.1:51820 (relay server)")
+	t.Log("[peer1] WireGuard interface up, ephemeral port, endpoint=127.0.0.1:51820")
 
 	// Give WireGuard handshake time to complete through relay
 	time.Sleep(3 * time.Second)

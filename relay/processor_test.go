@@ -42,15 +42,15 @@ func TestProcessorInitiation(t *testing.T) {
 
 	// Process initiation packet
 	initiationPacket := makeInitiationPacket(12345)
-	dest, err := processor.ProcessPacket(initiationPacket, source)
+	destinations, err := processor.ProcessPacket(initiationPacket, source)
 
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// Initiation has no receiver, so dest should be nil
-	if dest != nil {
-		t.Errorf("expected nil destination for initiation, got %v", dest)
+	// Initiation has no receiver and no other peers, so destinations should be empty
+	if len(destinations) != 0 {
+		t.Errorf("expected empty destinations for initiation with no peers, got %d destinations", len(destinations))
 	}
 
 	// Sender should be registered
@@ -77,18 +77,18 @@ func TestProcessorResponse(t *testing.T) {
 	senderEndpoint := NewUDPEndpoint(senderAddr)
 
 	responsePacket := makeResponsePacket(22222, 11111)
-	dest, err := processor.ProcessPacket(responsePacket, senderEndpoint)
+	destinations, err := processor.ProcessPacket(responsePacket, senderEndpoint)
 
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
 	// Should return receiver's endpoint for forwarding
-	if dest == nil {
-		t.Fatal("expected destination endpoint, got nil")
+	if len(destinations) != 1 {
+		t.Fatalf("expected 1 destination, got %d", len(destinations))
 	}
-	if !dest.Equal(receiverEndpoint) {
-		t.Errorf("destination mismatch: expected %v, got %v", receiverEndpoint, dest)
+	if !destinations[0].Equal(receiverEndpoint) {
+		t.Errorf("destination mismatch: expected %v, got %v", receiverEndpoint, destinations[0])
 	}
 
 	// Sender should now be registered
@@ -115,18 +115,18 @@ func TestProcessorTransport(t *testing.T) {
 	senderEndpoint := NewUDPEndpoint(senderAddr)
 
 	transportPacket := makeTransportPacket(55555)
-	dest, err := processor.ProcessPacket(transportPacket, senderEndpoint)
+	destinations, err := processor.ProcessPacket(transportPacket, senderEndpoint)
 
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
 	// Should return receiver's endpoint
-	if dest == nil {
-		t.Fatal("expected destination endpoint, got nil")
+	if len(destinations) != 1 {
+		t.Fatalf("expected 1 destination, got %d", len(destinations))
 	}
-	if !dest.Equal(receiverEndpoint) {
-		t.Errorf("destination mismatch: expected %v, got %v", receiverEndpoint, dest)
+	if !destinations[0].Equal(receiverEndpoint) {
+		t.Errorf("destination mismatch: expected %v, got %v", receiverEndpoint, destinations[0])
 	}
 
 	// Transport packets don't have sender index, so sender shouldn't be registered
@@ -144,15 +144,15 @@ func TestProcessorUnknownReceiver(t *testing.T) {
 
 	// Send response to unknown receiver
 	responsePacket := makeResponsePacket(12345, 99999)
-	dest, err := processor.ProcessPacket(responsePacket, source)
+	destinations, err := processor.ProcessPacket(responsePacket, source)
 
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// Destination should be nil (unknown receiver)
-	if dest != nil {
-		t.Errorf("expected nil destination for unknown receiver, got %v", dest)
+	// Destinations should be empty (unknown receiver)
+	if len(destinations) != 0 {
+		t.Errorf("expected empty destinations for unknown receiver, got %d", len(destinations))
 	}
 
 	// Sender should still be registered
@@ -199,5 +199,63 @@ func TestProcessorEndpointUpdate(t *testing.T) {
 	registered := registry.Lookup(12345)
 	if !registered.Equal(endpoint2) {
 		t.Errorf("expected updated endpoint %v, got %v", endpoint2, registered)
+	}
+}
+
+func TestProcessorBroadcastInitiation(t *testing.T) {
+	registry := NewRegistry()
+	processor := NewProcessor(registry)
+
+	// Register two existing peers
+	peer1Addr := &net.UDPAddr{IP: net.IPv4(10, 0, 0, 1), Port: 51820}
+	peer1Endpoint := NewUDPEndpoint(peer1Addr)
+	registry.Register(11111, peer1Endpoint)
+
+	peer2Addr := &net.UDPAddr{IP: net.IPv4(10, 0, 0, 2), Port: 51821}
+	peer2Endpoint := NewUDPEndpoint(peer2Addr)
+	registry.Register(22222, peer2Endpoint)
+
+	// New peer sends handshake initiation
+	newPeerAddr := &net.UDPAddr{IP: net.IPv4(10, 0, 0, 3), Port: 51822}
+	newPeerEndpoint := NewUDPEndpoint(newPeerAddr)
+
+	initiationPacket := makeInitiationPacket(33333)
+	destinations, err := processor.ProcessPacket(initiationPacket, newPeerEndpoint)
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Should broadcast to both existing peers (not to sender)
+	if len(destinations) != 2 {
+		t.Fatalf("expected 2 broadcast destinations, got %d", len(destinations))
+	}
+
+	// Check that destinations include both peers
+	foundPeer1 := false
+	foundPeer2 := false
+	for _, dest := range destinations {
+		if dest.Equal(peer1Endpoint) {
+			foundPeer1 = true
+		}
+		if dest.Equal(peer2Endpoint) {
+			foundPeer2 = true
+		}
+		if dest.Equal(newPeerEndpoint) {
+			t.Errorf("broadcast should not include sender")
+		}
+	}
+
+	if !foundPeer1 || !foundPeer2 {
+		t.Errorf("expected both peers in broadcast, got peer1=%v peer2=%v", foundPeer1, foundPeer2)
+	}
+
+	// New peer should be registered
+	registered := registry.Lookup(33333)
+	if registered == nil {
+		t.Fatal("expected new peer to be registered")
+	}
+	if !registered.Equal(newPeerEndpoint) {
+		t.Errorf("registered endpoint mismatch: expected %v, got %v", newPeerEndpoint, registered)
 	}
 }

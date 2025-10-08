@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"fmt"
+	"log"
 	"net"
 
 	"github.com/drio/spanza/relay"
@@ -35,18 +36,18 @@ func NewUDPListener(addr string, processor *relay.Processor) (*UDPListener, erro
 // Run starts the UDP listener loop, reading and processing packets
 // until the context is cancelled
 func (l *UDPListener) Run(ctx context.Context) error {
+	// Close connection when context is cancelled to unblock ReadFromUDP
+	go func() {
+		<-ctx.Done()
+		l.conn.Close()
+	}()
+
 	buf := make([]byte, 2048) // Buffer for UDP packets
 
 	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
-
 		n, addr, err := l.conn.ReadFromUDP(buf)
 		if err != nil {
-			// Check if we're shutting down
+			// Check if we're shutting down (context cancelled, connection closed)
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
@@ -68,15 +69,25 @@ func (l *UDPListener) handlePacket(packet []byte, sourceAddr *net.UDPAddr) {
 	source := relay.NewUDPEndpoint(sourceAddr)
 
 	// Process the packet through the relay processor
-	dest, err := l.processor.ProcessPacket(packet, source)
+	destinations, err := l.processor.ProcessPacket(packet, source)
 	if err != nil {
 		// Invalid packet, ignore
+		log.Printf("[relay] Invalid packet from %s: %v", sourceAddr, err)
 		return
 	}
 
-	// If we got a destination, forward the packet
-	if dest != nil {
-		l.forward(packet, dest)
+	// Forward to all destinations
+	if len(destinations) > 0 {
+		if len(destinations) == 1 {
+			log.Printf("[relay] Forwarding packet from %s to %s", sourceAddr, destinations[0].UDPAddr)
+		} else {
+			log.Printf("[relay] Broadcasting packet from %s to %d peers", sourceAddr, len(destinations))
+		}
+		for _, dest := range destinations {
+			l.forward(packet, dest)
+		}
+	} else {
+		log.Printf("[relay] No destination for packet from %s (learning phase)", sourceAddr)
 	}
 }
 

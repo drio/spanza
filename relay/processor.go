@@ -21,9 +21,14 @@ func NewProcessor(registry *Registry) *Processor {
 
 // ProcessPacket processes an incoming WireGuard packet from a source endpoint.
 // It updates the registry with learned sender information and returns the
-// destination endpoint where the packet should be forwarded.
-// Returns nil destination if the receiver is unknown.
-func (p *Processor) ProcessPacket(data []byte, source *Endpoint) (*Endpoint, error) {
+// destination endpoints where the packet should be forwarded.
+//
+// For handshake initiation packets (no receiver index), it broadcasts to all
+// known peers except the sender. For all other packets (with receiver index),
+// it returns a single destination.
+//
+// Returns empty slice if no destinations are available.
+func (p *Processor) ProcessPacket(data []byte, source *Endpoint) ([]*Endpoint, error) {
 	msg, err := packet.Parse(data)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse packet: %w", err)
@@ -36,11 +41,16 @@ func (p *Processor) ProcessPacket(data []byte, source *Endpoint) (*Endpoint, err
 
 	// Determine where to forward based on receiver index
 	if msg.Receiver != nil {
+		// Packet has receiver index - forward to specific peer
 		dest := p.registry.Lookup(*msg.Receiver)
-		return dest, nil
+		if dest != nil {
+			return []*Endpoint{dest}, nil
+		}
+		return []*Endpoint{}, nil
 	}
 
-	// No receiver index means this is an initiation packet
-	// (first message of handshake), nothing to forward yet
-	return nil, nil
+	// No receiver index means this is a handshake initiation packet.
+	// Broadcast to all known peers except the sender.
+	destinations := p.registry.GetAllExcept(source)
+	return destinations, nil
 }
