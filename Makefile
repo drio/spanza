@@ -109,3 +109,4 @@ help:
 	@echo "  check            - Run fmt, vet, lint, test, test-race, and security"
 	@echo "  sync             - Sync codebase to remote server (atom)"
 	@echo "  help             - Show this help message"
+
