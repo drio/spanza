@@ -6,7 +6,11 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/signal"
+	"syscall"
 
+	"github.com/drio/spanza/relay"
+	"github.com/drio/spanza/server"
 	"github.com/peterbourgon/ff/v3/ffcli"
 )
 
@@ -106,12 +110,38 @@ func newVersionCmd() *ffcli.Command {
 func runServer(ctx context.Context, udpAddr, wsAddr, certFile, keyFile string) error {
 	fmt.Printf("Starting server mode...\n")
 	fmt.Printf("  UDP address: %s\n", udpAddr)
-	fmt.Printf("  WebSocket address: %s\n", wsAddr)
-	fmt.Printf("  TLS cert: %s\n", certFile)
-	fmt.Printf("  TLS key: %s\n", keyFile)
 
-	// TODO: Implement server logic
-	return fmt.Errorf("server mode not yet implemented")
+	// Create registry and processor
+	registry := relay.NewRegistry()
+	processor := relay.NewProcessor(registry)
+
+	// Create server configuration
+	cfg := &server.ServerConfig{
+		UDPAddr:   udpAddr,
+		Registry:  registry,
+		Processor: processor,
+	}
+
+	// Create server
+	srv, err := server.NewServer(cfg)
+	if err != nil {
+		return fmt.Errorf("failed to create server: %w", err)
+	}
+	defer srv.Close()
+
+	// Set up signal handling for graceful shutdown
+	ctx, cancel := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+
+	fmt.Printf("Server running. Press Ctrl+C to stop.\n")
+
+	// Run server (blocks until context cancelled or error)
+	if err := srv.Run(ctx); err != nil && err != context.Canceled {
+		return fmt.Errorf("server error: %w", err)
+	}
+
+	fmt.Printf("Server stopped.\n")
+	return nil
 }
 
 func runClient(ctx context.Context, listenAddr, serverURL string, insecure bool) error {
