@@ -1,6 +1,6 @@
 # Makefile for spanza - WireGuard relay tool
 
-.PHONY: all build test test-race test-coverage test-integration clean run fmt vet lint security gosec vulncheck check help install-lint-tools install-security-tools
+.PHONY: all build test test-race test-coverage test-integration clean run fmt vet lint security gosec vulncheck check help install-lint-tools install-security-tools sync
 
 # Default target
 all: help
@@ -84,6 +84,12 @@ security: gosec vulncheck
 # Run all quality and security checks
 check: fmt vet lint test test-race security
 
+# Sync codebase to remote server
+sync:
+	@echo "Syncing codebase to atom..."
+	rsync -avz -e ssh --progress --exclude=.git . atom:spanza/
+	@echo "✓ Sync complete"
+
 # Show available targets
 help:
 	@echo "Available targets:"
@@ -101,4 +107,5 @@ help:
 	@echo "  vulncheck        - Run vulnerability scanner"
 	@echo "  security         - Run all security checks"
 	@echo "  check            - Run fmt, vet, lint, test, test-race, and security"
+	@echo "  sync             - Sync codebase to remote server (atom)"
 	@echo "  help             - Show this help message"
