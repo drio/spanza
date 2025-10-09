@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"flag"
 	"fmt"
@@ -10,16 +11,16 @@ import (
 	"os/signal"
 	"syscall"
 
-	"go4.org/mem"
 	"tailscale.com/derp"
 	"tailscale.com/derp/derphttp"
+	"tailscale.com/net/netmon"
 	"tailscale.com/types/key"
 )
 
 const version = "0.2.0-derp"
 
 var (
-	derpURL    = flag.String("derp-url", "https://derp1.tailscale.com", "DERP server URL")
+	derpURL    = flag.String("derp-url", "https://derp.tailscale.com/derp", "DERP server URL")
 	// DERP key is separate from WireGuard key - used only for DERP identity/addressing.
 	// Could use WG key instead (like Tailscale does), but keeping separate for cleaner separation.
 	keyFile    = flag.String("key-file", "", "Path to private key file (will generate if missing)")
@@ -29,6 +30,7 @@ var (
 	listenAddr = flag.String("listen", ":51821", "UDP listen address for WireGuard")
 	verbose    = flag.Bool("verbose", false, "Enable verbose logging")
 	showVersion = flag.Bool("version", false, "Show version and exit")
+	showPubkey = flag.Bool("show-pubkey", false, "Show DERP public key and exit")
 )
 
 // Gateway handles UDP <-> DERP translation
@@ -49,12 +51,21 @@ func main() {
 		return
 	}
 
+	if *showPubkey {
+		privKey, err := loadOrGenerateKey(*keyFile)
+		if err != nil {
+			log.Fatalf("Failed to load/generate key: %v", err)
+		}
+		fmt.Printf("%s\n", privKey.Public())
+		return
+	}
+
 	if *remotePeer == "" {
 		log.Fatal("--remote-peer is required")
 	}
 
-	remotePeerKey, err := key.ParseNodePublicUntyped(mem.S(*remotePeer))
-	if err != nil {
+	var remotePeerKey key.NodePublic
+	if err := remotePeerKey.UnmarshalText([]byte(*remotePeer)); err != nil {
 		log.Fatalf("Invalid remote peer key: %v", err)
 	}
 
@@ -127,9 +138,11 @@ func (gw *Gateway) connectDERP() error {
 	}
 
 	// netmon (network monitor) tracks network state changes (interface up/down, IP changes, etc).
-	// nil works but means no auto-reconnect on network changes - acceptable for testing/development.
-	// TODO: Consider adding netmon for production use with automatic reconnection.
-	client, err := derphttp.NewClient(gw.privateKey, *derpURL, logf, nil)
+	// Use static netmon (doesn't monitor actual network changes) - fine for basic relay.
+	// TODO: Consider using real netmon for production with automatic reconnection on network changes.
+	netMon := netmon.NewStatic()
+
+	client, err := derphttp.NewClient(gw.privateKey, *derpURL, logf, netMon)
 	if err != nil {
 		return fmt.Errorf("failed to create DERP client: %w", err)
 	}
@@ -222,7 +235,11 @@ func loadOrGenerateKey(path string) (key.NodePrivate, error) {
 
 	data, err := os.ReadFile(path)
 	if err == nil {
-		return key.ParseNodePrivateUntyped(mem.B(data))
+		var privKey key.NodePrivate
+		if err := privKey.UnmarshalText(bytes.TrimSpace(data)); err != nil {
+			return key.NodePrivate{}, fmt.Errorf("failed to parse key: %w", err)
+		}
+		return privKey, nil
 	}
 
 	privKey := key.NewNode()
@@ -230,6 +247,7 @@ func loadOrGenerateKey(path string) (key.NodePrivate, error) {
 	if err != nil {
 		return key.NodePrivate{}, fmt.Errorf("failed to marshal key: %w", err)
 	}
+	// MarshalText returns the key with "nodekey:" prefix, save it as-is
 	if err := os.WriteFile(path, marshaled, 0600); err != nil {
 		return key.NodePrivate{}, fmt.Errorf("failed to save key: %w", err)
 	}

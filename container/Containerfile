@@ -27,9 +27,12 @@ WORKDIR /workspace
 # Copy pre-built spanza binary
 COPY spanza ./spanza
 
-# Copy entrypoint script
+# Copy scripts and pre-generated DERP keys
 COPY container/entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
+COPY container/start-gateway.sh /workspace/start-gateway.sh
+COPY container/peer1-derp.key /workspace/peer1-derp.key
+COPY container/peer2-derp.key /workspace/peer2-derp.key
+RUN chmod +x /entrypoint.sh /workspace/start-gateway.sh
 
 ENTRYPOINT ["/entrypoint.sh"]
 CMD ["/bin/bash"]
