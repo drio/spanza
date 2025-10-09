@@ -20,17 +20,17 @@ import (
 const version = "0.2.0-derp"
 
 var (
-	derpURL    = flag.String("derp-url", "https://derp.tailscale.com/derp", "DERP server URL")
+	derpURL = flag.String("derp-url", "https://derp.tailscale.com/derp", "DERP server URL")
 	// DERP key is separate from WireGuard key - used only for DERP identity/addressing.
 	// Could use WG key instead (like Tailscale does), but keeping separate for cleaner separation.
 	keyFile    = flag.String("key-file", "", "Path to private key file (will generate if missing)")
 	remotePeer = flag.String("remote-peer", "", "Remote peer's DERP public key (nodekey:...)")
 	// TODO: could be auto-discovered from first UDP packet instead of manual config
-	wgEndpoint = flag.String("wg-endpoint", "127.0.0.1:51820", "Local WireGuard endpoint (IP:port)")
-	listenAddr = flag.String("listen", ":51821", "UDP listen address for WireGuard")
-	verbose    = flag.Bool("verbose", false, "Enable verbose logging")
+	wgEndpoint  = flag.String("wg-endpoint", "127.0.0.1:51820", "Local WireGuard endpoint (IP:port)")
+	listenAddr  = flag.String("listen", ":51821", "UDP listen address for WireGuard")
+	verbose     = flag.Bool("verbose", false, "Enable verbose logging")
 	showVersion = flag.Bool("version", false, "Show version and exit")
-	showPubkey = flag.Bool("show-pubkey", false, "Show DERP public key and exit")
+	showPubkey  = flag.Bool("show-pubkey", false, "Show DERP public key and exit")
 )
 
 // Gateway handles UDP <-> DERP translation
@@ -242,6 +242,7 @@ func loadOrGenerateKey(path string) (key.NodePrivate, error) {
 		return key.NewNode(), nil
 	}
 
+	// #nosec G304 - path is from CLI flag, user has filesystem access
 	data, err := os.ReadFile(path)
 	if err == nil {
 		var privKey key.NodePrivate
