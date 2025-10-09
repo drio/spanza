@@ -1,0 +1,6 @@
+# Ignore sensitive production data
+config/
+certs/
+
+# Keep documentation only
+!README.md
