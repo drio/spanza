@@ -117,16 +117,25 @@ func main() {
 	log.Printf("Gateway running. Press Ctrl+C to stop.")
 
 	errCh := make(chan error, 2)
-	go func() { errCh <- gw.udpToDERP() }()
-	go func() { errCh <- gw.derpToUDP() }()
+	go func() {
+		err := gw.udpToDERP()
+		log.Printf("udpToDERP goroutine exited: %v", err)
+		errCh <- err
+	}()
+	go func() {
+		err := gw.derpToUDP()
+		log.Printf("derpToUDP goroutine exited: %v", err)
+		errCh <- err
+	}()
 
 	select {
 	case err := <-errCh:
 		if err != nil {
 			log.Printf("Gateway error: %v", err)
 		}
+		log.Printf("Exiting due to goroutine error")
 	case <-ctx.Done():
-		log.Printf("Shutting down...")
+		log.Printf("Shutting down due to context cancellation: %v", ctx.Err())
 	}
 }
 

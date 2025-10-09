@@ -19,6 +19,8 @@ RUN apt-get update && apt-get install -y \
     socat \
     nmap \
     iperf3 \
+    ufw \
+    procps \
     && rm -rf /var/lib/apt/lists/*
 
 # Set working directory
@@ -30,9 +32,10 @@ COPY spanza ./spanza
 # Copy scripts and pre-generated DERP keys
 COPY container/entrypoint.sh /entrypoint.sh
 COPY container/start-gateway.sh /workspace/start-gateway.sh
+COPY container/firewall-test.sh /workspace/firewall-test.sh
 COPY container/peer1-derp.key /workspace/peer1-derp.key
 COPY container/peer2-derp.key /workspace/peer2-derp.key
-RUN chmod +x /entrypoint.sh /workspace/start-gateway.sh
+RUN chmod +x /entrypoint.sh /workspace/start-gateway.sh /workspace/firewall-test.sh
 
 ENTRYPOINT ["/entrypoint.sh"]
 CMD ["/bin/bash"]

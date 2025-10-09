@@ -1,5 +1,10 @@
 #!/bin/bash
 # Entrypoint that sets up WireGuard interface and Spanza gateway
+#
+# To test DERP relay when all UDP traffic is blocked (simulates restrictive firewall):
+#   ./firewall-test.sh enable   - Block all UDP, force DERP over HTTPS
+#   ./firewall-test.sh disable  - Remove firewall rules
+#   ./firewall-test.sh status   - Show firewall status
 
 set -e
 
@@ -83,22 +88,21 @@ esac
 
 echo ""
 echo "=========================================="
-echo "Starting Spanza gateway in background..."
-echo "=========================================="
-
-/workspace/start-gateway.sh &> /tmp/gateway.log &
-GATEWAY_PID=$!
-
-# Give gateway a moment to connect
-sleep 2
-
-echo ""
-echo "Gateway started (PID: $GATEWAY_PID)"
-echo "Gateway logs: /tmp/gateway.log"
-echo ""
-echo "=========================================="
-echo "Testing connectivity to $PING_TARGET..."
+echo "Setup complete!"
 echo "=========================================="
 echo ""
+echo "Start gateway:"
+echo "  ./start-gateway.sh > /tmp/gateway.log 2>&1 &"
+echo ""
+echo "Test connectivity:"
+echo "  ping $PING_TARGET"
+echo ""
+echo "View gateway logs:"
+echo "  tail -f /tmp/gateway.log"
+echo ""
+echo "Test firewall (blocks all UDP):"
+echo "  ./firewall-test.sh enable"
+echo "=========================================="
+echo ""
 
-exec ping -i 1 "$PING_TARGET"
+exec /bin/bash

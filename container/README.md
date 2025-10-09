@@ -13,47 +13,37 @@ peer1 container:                        peer2 container:
          └──────→ DERP Server (Tailscale) ←───────┘
 ```
 
-## Usage
+## Quick Start
 
 ```bash
 cd container
 
-# Build image
+# Build and start both peers (auto-starts gateway and pings)
 make build
+make start
 
-# Terminal 1: Start peer1
-make peer1
-# Inside container, note the DERP public key shown
+# You should see ping output showing connectivity between peers
+```
 
-# Terminal 2: Start peer2
-make peer2
-# Inside container, note the DERP public key shown
+## Firewall Testing
 
-# In peer1, start Spanza gateway with peer2's DERP key:
-./spanza --key-file /tmp/peer1-derp.key \
-         --derp-url https://derp1.tailscale.com \
-         --remote-peer nodekey:PEER2_PUBKEY \
-         --listen :51821 \
-         --wg-endpoint 127.0.0.1:51820 \
-         --verbose
+Test DERP relay under restrictive firewall conditions (all UDP blocked):
 
-# In peer2, start Spanza gateway with peer1's DERP key:
-./spanza --key-file /tmp/peer2-derp.key \
-         --derp-url https://derp1.tailscale.com \
-         --remote-peer nodekey:PEER1_PUBKEY \
-         --listen :51821 \
-         --wg-endpoint 127.0.0.1:51820 \
-         --verbose
+```bash
+# Inside a running container:
+./firewall-test.sh enable   # Block all UDP, force DERP over HTTPS
+./firewall-test.sh status   # Check firewall status
+./firewall-test.sh disable  # Remove firewall rules
 
-# Test connectivity:
-ping 192.168.4.2  # from peer1
-ping 192.168.4.1  # from peer2
+# With firewall enabled, WireGuard traffic must relay through DERP over HTTPS (port 443)
+# This simulates corporate firewalls that block UDP/peer-to-peer connections
 ```
 
 ## Available Tools
 
 - WireGuard: `wg show`, `wg-quick`
 - Network: `ping`, `tcpdump`, `netcat`, `iperf3`
+- Firewall: `ufw`, `iptables`, `./firewall-test.sh`
 - Debug: `vim`, `nano`, `curl`, `wget`
 
 ## Environment Variables
