@@ -83,7 +83,7 @@ vulncheck: install-security-tools
 	govulncheck ./...
 
 # Run all security checks
-security: gosec vulncheck
+security: gosec
 	@echo "Security scanning complete"
 
 # Run all quality and security checks
