@@ -2,177 +2,238 @@ package main
 
 import (
 	"context"
-	"errors"
 	"flag"
 	"fmt"
+	"log"
+	"net"
 	"os"
 	"os/signal"
 	"syscall"
 
-	"github.com/drio/spanza/client"
-	"github.com/drio/spanza/relay"
-	"github.com/drio/spanza/server"
-	"github.com/peterbourgon/ff/v3/ffcli"
+	"go4.org/mem"
+	"tailscale.com/derp"
+	"tailscale.com/derp/derphttp"
+	"tailscale.com/types/key"
 )
 
-const version = "0.1.0"
+const version = "0.2.0-derp"
+
+var (
+	derpURL    = flag.String("derp-url", "https://derp1.tailscale.com", "DERP server URL")
+	// DERP key is separate from WireGuard key - used only for DERP identity/addressing.
+	// Could use WG key instead (like Tailscale does), but keeping separate for cleaner separation.
+	keyFile    = flag.String("key-file", "", "Path to private key file (will generate if missing)")
+	remotePeer = flag.String("remote-peer", "", "Remote peer's DERP public key (nodekey:...)")
+	// TODO: could be auto-discovered from first UDP packet instead of manual config
+	wgEndpoint = flag.String("wg-endpoint", "127.0.0.1:51820", "Local WireGuard endpoint (IP:port)")
+	listenAddr = flag.String("listen", ":51821", "UDP listen address for WireGuard")
+	verbose    = flag.Bool("verbose", false, "Enable verbose logging")
+	showVersion = flag.Bool("version", false, "Show version and exit")
+)
+
+// Gateway handles UDP <-> DERP translation
+type Gateway struct {
+	derpClient    *derphttp.Client
+	privateKey    key.NodePrivate
+	udpConn       *net.UDPConn
+	remotePeerKey key.NodePublic
+	wgAddr        *net.UDPAddr
+	ctx           context.Context
+}
 
 func main() {
-	if err := run(os.Args[1:]); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
-	}
-}
+	flag.Parse()
 
-func run(args []string) error {
-	rootCmd := newRootCmd()
-	if err := rootCmd.Parse(args); err != nil {
-		if errors.Is(err, flag.ErrHelp) {
-			return nil
+	if *showVersion {
+		fmt.Printf("spanza %s - WireGuard to DERP gateway\n", version)
+		return
+	}
+
+	if *remotePeer == "" {
+		log.Fatal("--remote-peer is required")
+	}
+
+	remotePeerKey, err := key.ParseNodePublicUntyped(mem.S(*remotePeer))
+	if err != nil {
+		log.Fatalf("Invalid remote peer key: %v", err)
+	}
+
+	privKey, err := loadOrGenerateKey(*keyFile)
+	if err != nil {
+		log.Fatalf("Failed to load/generate key: %v", err)
+	}
+
+	if *verbose {
+		log.Printf("Our public key: %s", privKey.Public())
+		log.Printf("Remote peer key: %s", remotePeerKey)
+	}
+
+	wgAddr, err := net.ResolveUDPAddr("udp", *wgEndpoint)
+	if err != nil {
+		log.Fatalf("Invalid WireGuard endpoint: %v", err)
+	}
+
+	listenUDPAddr, err := net.ResolveUDPAddr("udp", *listenAddr)
+	if err != nil {
+		log.Fatalf("Invalid listen address: %v", err)
+	}
+
+	udpConn, err := net.ListenUDP("udp", listenUDPAddr)
+	if err != nil {
+		log.Fatalf("Failed to listen on UDP: %v", err)
+	}
+	defer udpConn.Close()
+
+	log.Printf("UDP listener started on %s", *listenAddr)
+
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+
+	gw := &Gateway{
+		privateKey:    privKey,
+		udpConn:       udpConn,
+		remotePeerKey: remotePeerKey,
+		wgAddr:        wgAddr,
+		ctx:           ctx,
+	}
+
+	if err := gw.connectDERP(); err != nil {
+		log.Fatalf("Failed to connect to DERP: %v", err)
+	}
+	defer gw.derpClient.Close()
+
+	log.Printf("Connected to DERP server: %s", *derpURL)
+	log.Printf("Gateway running. Press Ctrl+C to stop.")
+
+	errCh := make(chan error, 2)
+	go func() { errCh <- gw.udpToDERP() }()
+	go func() { errCh <- gw.derpToUDP() }()
+
+	select {
+	case err := <-errCh:
+		if err != nil {
+			log.Printf("Gateway error: %v", err)
 		}
-		return err
-	}
-	return rootCmd.Run(context.Background())
-}
-
-func newRootCmd() *ffcli.Command {
-	rootfs := flag.NewFlagSet("spanza", flag.ExitOnError)
-
-	return &ffcli.Command{
-		Name:       "spanza",
-		ShortUsage: "spanza <subcommand> [flags]",
-		ShortHelp:  "WireGuard relay tool for NAT traversal",
-		LongHelp: `spanza is a relay tool that forwards WireGuard packets over WebSocket/TLS
-to enable peer communication when UDP traffic is blocked.`,
-		Subcommands: []*ffcli.Command{
-			newServerCmd(),
-			newClientCmd(),
-			newVersionCmd(),
-		},
-		FlagSet: rootfs,
-		Exec: func(ctx context.Context, args []string) error {
-			return flag.ErrHelp
-		},
+	case <-ctx.Done():
+		log.Printf("Shutting down...")
 	}
 }
 
-func newServerCmd() *ffcli.Command {
-	fs := flag.NewFlagSet("spanza server", flag.ExitOnError)
-	udpAddr := fs.String("udp-addr", ":51820", "UDP listen address")
-	wsAddr := fs.String("ws-addr", ":8443", "WebSocket/TLS listen address")
-	certFile := fs.String("cert", "cert.pem", "TLS certificate file")
-	keyFile := fs.String("key", "key.pem", "TLS key file")
-
-	return &ffcli.Command{
-		Name:       "server",
-		ShortUsage: "spanza server [flags]",
-		ShortHelp:  "Run in server mode",
-		LongHelp: `Run spanza in server mode. The server binds to UDP and TCP/WebSocket ports,
-inspects incoming WireGuard packets, and relays them to the appropriate peer.`,
-		FlagSet: fs,
-		Exec: func(ctx context.Context, args []string) error {
-			return runServer(ctx, *udpAddr, *wsAddr, *certFile, *keyFile)
-		},
+func (gw *Gateway) connectDERP() error {
+	logf := func(format string, args ...any) {
+		if *verbose {
+			log.Printf("[DERP] "+format, args...)
+		}
 	}
+
+	// netmon (network monitor) tracks network state changes (interface up/down, IP changes, etc).
+	// nil works but means no auto-reconnect on network changes - acceptable for testing/development.
+	// TODO: Consider adding netmon for production use with automatic reconnection.
+	client, err := derphttp.NewClient(gw.privateKey, *derpURL, logf, nil)
+	if err != nil {
+		return fmt.Errorf("failed to create DERP client: %w", err)
+	}
+
+	gw.derpClient = client
+	return nil
 }
 
-func newClientCmd() *ffcli.Command {
-	fs := flag.NewFlagSet("spanza client", flag.ExitOnError)
-	listenAddr := fs.String("listen", ":51820", "UDP listen address")
-	serverAddr := fs.String("server", "localhost:51820", "Server UDP address")
+func (gw *Gateway) udpToDERP() error {
+	buf := make([]byte, 65535)
 
-	return &ffcli.Command{
-		Name:       "client",
-		ShortUsage: "spanza client [flags]",
-		ShortHelp:  "Run in client (sidecar) mode",
-		LongHelp: `Run spanza in client mode. The client listens on a UDP port and forwards
-WireGuard packets to the server over UDP.`,
-		FlagSet: fs,
-		Exec: func(ctx context.Context, args []string) error {
-			return runClient(ctx, *listenAddr, *serverAddr)
-		},
-	}
-}
-
-func newVersionCmd() *ffcli.Command {
-	return &ffcli.Command{
-		Name:       "version",
-		ShortUsage: "spanza version",
-		ShortHelp:  "Print version information",
-		Exec: func(ctx context.Context, args []string) error {
-			fmt.Printf("spanza v%s\n", version)
-			fmt.Printf("WireGuard relay tool for NAT traversal\n")
+	for {
+		select {
+		case <-gw.ctx.Done():
 			return nil
-		},
+		default:
+		}
+
+		n, addr, err := gw.udpConn.ReadFromUDP(buf)
+		if err != nil {
+			if gw.ctx.Err() != nil {
+				return nil
+			}
+			log.Printf("UDP read error: %v", err)
+			continue
+		}
+
+		if *verbose {
+			log.Printf("UDP recv: %d bytes from %s", n, addr)
+		}
+
+		if err := gw.derpClient.Send(gw.remotePeerKey, buf[:n]); err != nil {
+			log.Printf("DERP send error: %v", err)
+			continue
+		}
+
+		if *verbose {
+			log.Printf("DERP sent: %d bytes to %s", n, gw.remotePeerKey.ShortString())
+		}
 	}
 }
 
-func runServer(ctx context.Context, udpAddr, wsAddr, certFile, keyFile string) error {
-	fmt.Printf("Starting server mode...\n")
-	fmt.Printf("  UDP address: %s\n", udpAddr)
+func (gw *Gateway) derpToUDP() error {
+	for {
+		select {
+		case <-gw.ctx.Done():
+			return nil
+		default:
+		}
 
-	// Create registry and processor
-	registry := relay.NewRegistry()
-	processor := relay.NewProcessor(registry)
+		msg, err := gw.derpClient.Recv()
+		if err != nil {
+			if gw.ctx.Err() != nil {
+				return nil
+			}
+			log.Printf("DERP recv error: %v", err)
+			continue
+		}
 
-	// Create server configuration
-	cfg := &server.ServerConfig{
-		UDPAddr:   udpAddr,
-		Registry:  registry,
-		Processor: processor,
+		switch m := msg.(type) {
+		case derp.ReceivedPacket:
+			if *verbose {
+				log.Printf("DERP recv: %d bytes from %s", len(m.Data), m.Source.ShortString())
+			}
+
+			n, err := gw.udpConn.WriteToUDP(m.Data, gw.wgAddr)
+			if err != nil {
+				log.Printf("UDP write error: %v", err)
+				continue
+			}
+
+			if *verbose {
+				log.Printf("UDP sent: %d bytes to %s", n, gw.wgAddr)
+			}
+
+		default:
+			if *verbose {
+				log.Printf("DERP: received non-packet message: %T", msg)
+			}
+		}
 	}
-
-	// Create server
-	srv, err := server.NewServer(cfg)
-	if err != nil {
-		return fmt.Errorf("failed to create server: %w", err)
-	}
-	defer srv.Close()
-
-	// Set up signal handling for graceful shutdown
-	ctx, cancel := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
-	defer cancel()
-
-	fmt.Printf("Server running. Press Ctrl+C to stop.\n")
-
-	// Run server (blocks until context cancelled or error)
-	if err := srv.Run(ctx); err != nil && err != context.Canceled {
-		return fmt.Errorf("server error: %w", err)
-	}
-
-	fmt.Printf("Server stopped.\n")
-	return nil
 }
 
-func runClient(ctx context.Context, listenAddr, serverAddr string) error {
-	fmt.Printf("Starting client mode...\n")
-	fmt.Printf("  Listen address: %s\n", listenAddr)
-	fmt.Printf("  Server address: %s\n", serverAddr)
-
-	// Create client configuration
-	cfg := &client.ClientConfig{
-		ListenAddr: listenAddr,
-		ServerAddr: serverAddr,
+func loadOrGenerateKey(path string) (key.NodePrivate, error) {
+	if path == "" {
+		// Ephemeral key - fine since DERP key is just for addressing, not encryption.
+		// Remote peer will need to know the new public key each run.
+		return key.NewNode(), nil
 	}
 
-	// Create client
-	c, err := client.NewClient(cfg)
+	data, err := os.ReadFile(path)
+	if err == nil {
+		return key.ParseNodePrivateUntyped(mem.B(data))
+	}
+
+	privKey := key.NewNode()
+	marshaled, err := privKey.MarshalText()
 	if err != nil {
-		return fmt.Errorf("failed to create client: %w", err)
+		return key.NodePrivate{}, fmt.Errorf("failed to marshal key: %w", err)
 	}
-	defer c.Close()
-
-	// Set up signal handling for graceful shutdown
-	ctx, cancel := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
-	defer cancel()
-
-	fmt.Printf("Client running. Press Ctrl+C to stop.\n")
-
-	// Run client (blocks until context cancelled or error)
-	if err := c.Run(ctx); err != nil && err != context.Canceled {
-		return fmt.Errorf("client error: %w", err)
+	if err := os.WriteFile(path, marshaled, 0600); err != nil {
+		return key.NodePrivate{}, fmt.Errorf("failed to save key: %w", err)
 	}
 
-	fmt.Printf("Client stopped.\n")
-	return nil
+	log.Printf("Generated new key and saved to %s", path)
+	return privKey, nil
 }

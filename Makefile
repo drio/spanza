@@ -1,9 +1,14 @@
 # Makefile for spanza - WireGuard relay tool
 
-.PHONY: all build test test-race test-coverage test-integration clean run fmt vet lint security gosec vulncheck check help install-lint-tools install-security-tools sync
+.PHONY: all build test test-race test-coverage test-integration clean init run fmt vet lint security gosec vulncheck check help install-lint-tools install-security-tools sync
 
 # Default target
 all: help
+
+# Initialize new project
+init:
+	@echo "Initializing Go module..."
+	go mod init github.com/drio/spanza
 
 # Build the spanza binary
 build:
