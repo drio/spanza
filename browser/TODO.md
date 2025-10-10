@@ -28,20 +28,20 @@ DERP client ──────────────────────�
 - [x] Document wasm_exec.js runtime bridge
 - [x] Commit: "Add basic WASM infrastructure for browser-based WireGuard"
 
-### 🚧 Phase 1: Server Peer (IN PROGRESS)
+### ✅ Phase 1: Server Peer (COMPLETED)
 Create the server peer that browser will connect to.
 
-- [ ] Create browser/server/ directory structure
-- [ ] Create server/main.go with:
-  - [ ] Userspace WireGuard device (192.168.4.1)
-  - [ ] Spanza gateway (UDP → DERP)
-  - [ ] Simple HTTP server (for testing connectivity)
-- [ ] Create server/Makefile (build, run, clean targets)
-- [ ] Generate/document WireGuard keys for both peers
-- [ ] Test server peer runs independently
-- [ ] Document server peer configuration
+- [x] Create browser/server/ directory structure
+- [x] Create server/main.go with:
+  - [x] Userspace WireGuard device (192.168.4.1)
+  - [x] Spanza gateway (UDP → DERP)
+  - [x] Simple HTTP server (for testing connectivity)
+- [x] Create server/Makefile (build, run, clean targets)
+- [x] Generate/document WireGuard keys for both peers
+- [x] Test server peer builds successfully
+- [x] Commit: "Add WireGuard server peer for browser testing"
 
-### Phase 2: WASM WireGuard Device
+### 🚧 Phase 2: WASM WireGuard Device (IN PROGRESS)
 Add userspace WireGuard to WASM module.
 
 - [ ] Add WireGuard imports to browser/wasm/main.go
@@ -94,9 +94,10 @@ Prove end-to-end connectivity.
 
 ## Current Focus
 
-**Step 1.1**: Create server peer directory structure and basic main.go
+**Phase 2: WASM WireGuard Device**
 
-We're building the server peer first because:
-1. Gives us a clear target to connect to
-2. Can test independently before WASM complexity
-3. Reuses proven patterns from userspace/ustest.go
+Now that we have a working server peer, we'll add WireGuard to the WASM
+module. This will create a userspace WireGuard device that runs in the browser.
+
+Key challenge: Making sure WireGuard compiles for WASM target and works with
+netstack in the browser environment.
