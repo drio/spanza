@@ -38,8 +38,12 @@
     <!-- Status indicator -->
     <div id="status" class="status loading">Loading WASM module...</div>
 
-    <!-- Test button (disabled until WASM loads) -->
-    <button id="testBtn" disabled>Call hello() function</button>
+    <!-- Control buttons -->
+    <div style="margin: 20px 0;">
+        <button id="testBtn" disabled>Test: hello()</button>
+        <button id="connectBtn" disabled>Connect WireGuard + DERP</button>
+        <button id="statusBtn" disabled>Get Status</button>
+    </div>
 
     <!-- Output area -->
     <div id="output"></div>
@@ -82,9 +86,11 @@
                 go.run(result.instance);
 
                 // Update UI to show we're ready
-                document.getElementById("status").textContent = "WASM module loaded! ✓";
+                document.getElementById("status").textContent = "WASM module loaded! ✓ Ready to connect.";
                 document.getElementById("status").className = "status ready";
                 document.getElementById("testBtn").disabled = false;
+                document.getElementById("connectBtn").disabled = false;
+                document.getElementById("statusBtn").disabled = false;
 
             } catch (err) {
                 console.error("Failed to load WASM:", err);
@@ -93,15 +99,48 @@
             }
         }
 
-        // Set up the test button
-        document.getElementById("testBtn").addEventListener("click", () => {
-            // Call the hello() function that our Go code exposed
-            // This calls the Go function via JavaScript
-            const result = hello();
-
-            // Display the result
+        function logOutput(msg) {
             const output = document.getElementById("output");
-            output.textContent = "Result: " + result + "\n" + output.textContent;
+            const timestamp = new Date().toLocaleTimeString();
+            output.textContent = `[${timestamp}] ${msg}\n` + output.textContent;
+        }
+
+        // Test button - calls hello()
+        document.getElementById("testBtn").addEventListener("click", () => {
+            const result = hello();
+            logOutput("hello() returned: " + result);
+        });
+
+        // Connect button - creates WireGuard + DERP connection
+        document.getElementById("connectBtn").addEventListener("click", () => {
+            logOutput("Calling createWireGuard()...");
+            try {
+                const result = createWireGuard();
+                logOutput("createWireGuard() result: " + JSON.stringify(result, null, 2));
+
+                if (result.success) {
+                    document.getElementById("status").textContent =
+                        `✓ Connected! ${result.localIP} ↔ DERP ↔ ${result.peerIP}`;
+                    document.getElementById("status").className = "status ready";
+                } else {
+                    document.getElementById("status").textContent = "Error: " + result.error;
+                    document.getElementById("status").className = "status error";
+                }
+            } catch (err) {
+                logOutput("ERROR: " + err);
+                document.getElementById("status").textContent = "Error: " + err;
+                document.getElementById("status").className = "status error";
+            }
+        });
+
+        // Status button - gets current status
+        document.getElementById("statusBtn").addEventListener("click", () => {
+            try {
+                const status = getStatus();
+                logOutput("Status: " + JSON.stringify(status, null, 2));
+            } catch (err) {
+                logOutput("ERROR getting status: " + err);
+            }
         });
 
         // Load the WASM module when page loads
