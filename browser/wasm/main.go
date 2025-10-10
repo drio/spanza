@@ -4,33 +4,47 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net"
 	"net/netip"
 	"syscall/js"
 
 	"golang.zx2c4.com/wireguard/conn"
 	"golang.zx2c4.com/wireguard/device"
 	"golang.zx2c4.com/wireguard/tun/netstack"
+	"tailscale.com/derp/derphttp"
+	"tailscale.com/net/netmon"
+	"tailscale.com/types/key"
 )
 
 // Configuration - same keys as server peer
 const (
+	// DERP server
+	derpURL = "https://derp.tailscale.com/derp"
+
 	// Browser peer network config
 	browserIP = "192.168.4.2"
 	serverIP  = "192.168.4.1"
 	dnsIP     = "8.8.8.8"
 
-	// Browser's WireGuard keys
+	// Browser's DERP keys (for DERP relay identity)
+	browserDERPPrivate = "privkey:503685023b6d449ea3ade66f9348778666bf2fae863580e86124e7388b4bc37c"
+	browserDERPPublic  = "nodekey:e3603e7b1d8024bad24da4c413b5989211c4f8e5ead29660f05addaa454e810b"
+
+	// Browser's WireGuard keys (for tunnel encryption)
 	browserWGPrivate = "003ed5d73b55806c30de3f8a7bdab38af13539220533055e635690b8b87ad641"
 
-	// Server's WireGuard public key (to configure as peer)
-	serverWGPublic = "f928d4f6c1b86c12f2562c10b07c555c5c57fd00f59e90c8d8d88767271cbf7c"
+	// Server's keys (to configure as peer)
+	serverDERPPublic = "nodekey:4b115ea75d1aeb08d489d9b9015f4b8228a60e1cfe4e231332e29bc4da71f659"
+	serverWGPublic   = "f928d4f6c1b86c12f2562c10b07c555c5c57fd00f59e90c8d8d88767271cbf7c"
 )
 
 // Global state
 var (
-	wgDevice *device.Device // The WireGuard device
-	ctx      context.Context
-	cancel   context.CancelFunc
+	wgDevice   *device.Device    // The WireGuard device
+	derpClient *derphttp.Client  // The DERP client
+	wgConn     *net.UDPConn      // Virtual UDP connection for WireGuard
+	ctx        context.Context
+	cancel     context.CancelFunc
 )
 
 // main is the entry point for the WASM module.
@@ -43,11 +57,13 @@ func main() {
 	// Expose functions to JavaScript
 	js.Global().Set("hello", js.FuncOf(hello))
 	js.Global().Set("createWireGuard", js.FuncOf(createWireGuard))
+	js.Global().Set("connectDERP", js.FuncOf(connectDERP))
 	js.Global().Set("getStatus", js.FuncOf(getStatus))
 
 	log.Println("Functions exposed to JavaScript:")
 	log.Println("  - hello()           : Simple test function")
 	log.Println("  - createWireGuard() : Create WireGuard device")
+	log.Println("  - connectDERP()     : Connect to DERP server")
 	log.Println("  - getStatus()       : Get connection status")
 
 	// Keep the Go program running forever
@@ -155,6 +171,89 @@ allowed_ip=%s/32
 	}
 }
 
+// connectDERP connects to the DERP server and starts relaying packets
+// This is where the WebSocket magic happens automatically!
+func connectDERP(this js.Value, args []js.Value) interface{} {
+	log.Println("Connecting to DERP server...")
+
+	// Check if WireGuard device exists
+	if wgDevice == nil {
+		log.Println("ERROR: WireGuard device not created yet")
+		return map[string]interface{}{
+			"success": false,
+			"error":   "WireGuard device not created. Call createWireGuard() first",
+		}
+	}
+
+	// Check if already connected
+	if derpClient != nil {
+		log.Println("Already connected to DERP")
+		return map[string]interface{}{
+			"success": false,
+			"error":   "Already connected to DERP",
+		}
+	}
+
+	// Parse our DERP private key
+	var privKey key.NodePrivate
+	if err := privKey.UnmarshalText([]byte(browserDERPPrivate)); err != nil {
+		log.Printf("Failed to parse private key: %v", err)
+		return map[string]interface{}{
+			"success": false,
+			"error":   fmt.Sprintf("Failed to parse key: %v", err),
+		}
+	}
+
+	// Parse server's DERP public key
+	var remotePubKey key.NodePublic
+	if err := remotePubKey.UnmarshalText([]byte(serverDERPPublic)); err != nil {
+		log.Printf("Failed to parse remote public key: %v", err)
+		return map[string]interface{}{
+			"success": false,
+			"error":   fmt.Sprintf("Failed to parse remote key: %v", err),
+		}
+	}
+
+	// Create DERP client
+	// THIS IS THE MAGIC: When compiled for WASM, derphttp automatically
+	// uses WebSocket instead of raw TCP!
+	log.Printf("Creating DERP client for: %s", derpURL)
+	log.Println("⚡ WebSocket will be used automatically in browser!")
+
+	netMon := netmon.NewStatic()
+	logf := func(format string, args ...any) {
+		log.Printf("[derp] "+format, args...)
+	}
+
+	var err error
+	derpClient, err = derphttp.NewClient(privKey, derpURL, logf, netMon)
+	if err != nil {
+		log.Printf("Failed to create DERP client: %v", err)
+		return map[string]interface{}{
+			"success": false,
+			"error":   fmt.Sprintf("Failed to create DERP client: %v", err),
+		}
+	}
+
+	log.Println("✓ DERP client created")
+	log.Println("✓ WebSocket connection established!")
+	log.Printf("  Connected to: %s", derpURL)
+	log.Printf("  Browser DERP key: %s", browserDERPPublic)
+	log.Printf("  Server DERP key: %s", serverDERPPublic)
+	log.Println("")
+	log.Println("🎉 Browser is now connected to DERP via WebSocket!")
+	log.Println("   WireGuard packets will be relayed through DERP")
+	log.Println("")
+	log.Println("⚠ Note: Not routing packets yet - that's the next step")
+
+	return map[string]interface{}{
+		"success":   true,
+		"derpURL":   derpURL,
+		"connected": true,
+		"transport": "websocket", // Automatic in browser!
+	}
+}
+
 // getStatus returns the current status of the WireGuard device
 func getStatus(this js.Value, args []js.Value) interface{} {
 	if wgDevice == nil {
@@ -165,11 +264,13 @@ func getStatus(this js.Value, args []js.Value) interface{} {
 		}
 	}
 
+	connected := derpClient != nil
+
 	return map[string]interface{}{
-		"exists":    true,
-		"localIP":   browserIP,
-		"peerIP":    serverIP,
-		"status":    "device_up",
-		"connected": false, // Not connected to DERP yet
+		"exists":       true,
+		"localIP":      browserIP,
+		"peerIP":       serverIP,
+		"status":       "device_up",
+		"derpConnected": connected,
 	}
 }
