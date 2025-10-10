@@ -85,6 +85,13 @@ Prove end-to-end connectivity.
 - [ ] Document key management
 - [ ] Clean up code and comments
 
+### Phase 7: Refactoring
+- [ ] Extract gateway logic into reusable package
+  - Gateway is duplicated in main.go, userspace/ustest.go, browser/server/main.go
+  - Create gateway/ package with clean API
+  - Refactor all instances to use the package
+- [ ] Review and consolidate other duplicated code
+
 ## Current Focus
 
 **Step 1.1**: Create server peer directory structure and basic main.go
