@@ -5,6 +5,24 @@ communicating through the Spanza DERP relay. Everything runs in a single Go
 process with no kernel involvement, no root privileges, and no containers
 required.
 
+## Thank you
+
+To Jason [Jason Donenfeld](https://www.zx2c4.com/) for his contributions. Nothing
+of what I did here is new, it is based on his amazing work:
+
+From the good folks at [Fly.io](https://fly.io/blog/our-user-mode-wireguard-year/):
+
+<pre>
+"I said this within earshot of Jason Donenfeld. The next morning, he had a
+working demo. As it turns out, the gVisor project had exactly the same
+user-mode TCP/IP problem, and built a pretty excellent TCP stack in Golang.
+Jason added bindings to wireguard-go, and an enterprising soul (Ben Burkert,
+pay him all your moneys, he’s fantastic) offered to build the feature into
+flyctl. We were off to the races: you could flyctl ssh console into any Fly.io
+app, with no client configuration beyond just installing flyctl."
+</pre>
+
+
 ## What's Different from Container Testing?
 
 ### Container Approach (`container/`)
