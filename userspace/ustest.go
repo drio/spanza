@@ -10,13 +10,10 @@ import (
 	"net/netip"
 	"time"
 
+	"github.com/drio/spanza/gateway"
 	"golang.zx2c4.com/wireguard/conn"
 	"golang.zx2c4.com/wireguard/device"
 	"golang.zx2c4.com/wireguard/tun/netstack"
-	"tailscale.com/derp"
-	"tailscale.com/derp/derphttp"
-	"tailscale.com/net/netmon"
-	"tailscale.com/types/key"
 )
 
 const (
@@ -61,10 +58,58 @@ func main() {
 	// Start Spanza gateways
 	// Each peer gets its own gateway with unique ports
 	log.Println("Starting Spanza gateways...")
-	go runSpanzaGateway(ctx, "[peer1-gw]", peer1DERPPrivate, peer2DERPPublic,
-		fmt.Sprintf(":%d", peer1GatewayPort), fmt.Sprintf("127.0.0.1:%d", peer1WGPort))
-	go runSpanzaGateway(ctx, "[peer2-gw]", peer2DERPPrivate, peer1DERPPublic,
-		fmt.Sprintf(":%d", peer2GatewayPort), fmt.Sprintf("127.0.0.1:%d", peer2WGPort))
+
+	// Create UDP listener for peer1 gateway
+	peer1UDPAddr, err := net.ResolveUDPAddr("udp", fmt.Sprintf(":%d", peer1GatewayPort))
+	if err != nil {
+		log.Fatal(err)
+	}
+	peer1UDPConn, err := net.ListenUDP("udp", peer1UDPAddr)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer peer1UDPConn.Close()
+
+	// Create UDP listener for peer2 gateway
+	peer2UDPAddr, err := net.ResolveUDPAddr("udp", fmt.Sprintf(":%d", peer2GatewayPort))
+	if err != nil {
+		log.Fatal(err)
+	}
+	peer2UDPConn, err := net.ListenUDP("udp", peer2UDPAddr)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer peer2UDPConn.Close()
+
+	// Start peer1 gateway
+	go func() {
+		cfg := gateway.Config{
+			Prefix:          "[peer1-gw]",
+			DerpURL:         derpURL,
+			PrivKeyStr:      peer1DERPPrivate,
+			RemotePubKeyStr: peer2DERPPublic,
+			WGEndpoint:      fmt.Sprintf("127.0.0.1:%d", peer1WGPort),
+			Verbose:         false,
+		}
+		if err := gateway.Run(ctx, cfg, peer1UDPConn); err != nil {
+			log.Printf("[peer1-gw] Error: %v", err)
+		}
+	}()
+
+	// Start peer2 gateway
+	go func() {
+		cfg := gateway.Config{
+			Prefix:          "[peer2-gw]",
+			DerpURL:         derpURL,
+			PrivKeyStr:      peer2DERPPrivate,
+			RemotePubKeyStr: peer1DERPPublic,
+			WGEndpoint:      fmt.Sprintf("127.0.0.1:%d", peer2WGPort),
+			Verbose:         false,
+		}
+		if err := gateway.Run(ctx, cfg, peer2UDPConn); err != nil {
+			log.Printf("[peer2-gw] Error: %v", err)
+		}
+	}()
 
 	// Give gateways a moment to connect to DERP
 	time.Sleep(1 * time.Second)
@@ -223,108 +268,4 @@ endpoint=127.0.0.1:%d
 	}
 
 	log.Printf("[peer2] ✅ Response from peer1: %s", string(body))
-}
-
-// runSpanzaGateway runs the Spanza UDP-to-DERP gateway
-func runSpanzaGateway(ctx context.Context, prefix, privKeyStr, remotePubKeyStr, listenAddr, wgEndpoint string) {
-	log.Printf("%s Starting Spanza gateway...", prefix)
-
-	// Parse DERP private key
-	var privKey key.NodePrivate
-	if err := privKey.UnmarshalText([]byte(privKeyStr)); err != nil {
-		log.Fatalf("%s Failed to parse private key: %v", prefix, err)
-	}
-
-	// Parse remote peer's DERP public key
-	var remotePubKey key.NodePublic
-	if err := remotePubKey.UnmarshalText([]byte(remotePubKeyStr)); err != nil {
-		log.Fatalf("%s Failed to parse remote public key: %v", prefix, err)
-	}
-
-	// Create UDP listener
-	listenUDPAddr, err := net.ResolveUDPAddr("udp", listenAddr)
-	if err != nil {
-		log.Fatalf("%s Invalid listen address: %v", prefix, err)
-	}
-
-	udpConn, err := net.ListenUDP("udp", listenUDPAddr)
-	if err != nil {
-		log.Fatalf("%s Failed to listen on UDP: %v", prefix, err)
-	}
-	defer udpConn.Close()
-
-	// Resolve WireGuard endpoint
-	wgAddr, err := net.ResolveUDPAddr("udp", wgEndpoint)
-	if err != nil {
-		log.Fatalf("%s Invalid WireGuard endpoint: %v", prefix, err)
-	}
-
-	// Create DERP client
-	netMon := netmon.NewStatic()
-	logf := func(format string, args ...any) {
-		// Suppress verbose DERP logs
-	}
-
-	derpClient, err := derphttp.NewClient(privKey, derpURL, logf, netMon)
-	if err != nil {
-		log.Fatalf("%s Failed to create DERP client: %v", prefix, err)
-	}
-	defer derpClient.Close()
-
-	log.Printf("%s Gateway connected to DERP", prefix)
-
-	// UDP -> DERP
-	go func() {
-		buf := make([]byte, 65535)
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			default:
-			}
-
-			n, _, err := udpConn.ReadFromUDP(buf)
-			if err != nil {
-				if ctx.Err() != nil {
-					return
-				}
-				continue
-			}
-
-			if err := derpClient.Send(remotePubKey, buf[:n]); err != nil {
-				log.Printf("%s DERP send error: %v", prefix, err)
-			}
-		}
-	}()
-
-	// DERP -> UDP
-	go func() {
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			default:
-			}
-
-			msg, err := derpClient.Recv()
-			if err != nil {
-				if ctx.Err() != nil {
-					return
-				}
-				log.Printf("%s DERP recv error: %v", prefix, err)
-				continue
-			}
-
-			switch m := msg.(type) {
-			case derp.ReceivedPacket:
-				_, err := udpConn.WriteToUDP(m.Data, wgAddr)
-				if err != nil {
-					log.Printf("%s UDP write error: %v", prefix, err)
-				}
-			}
-		}
-	}()
-
-	<-ctx.Done()
-	log.Printf("%s Gateway shutting down", prefix)
 }
