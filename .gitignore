@@ -13,3 +13,4 @@ browser/server/server
 browser/wasm/main.wasm
 browser/server/main.wasm
 userspace/userspace
+browser/client/.syncthing.client.tmp
