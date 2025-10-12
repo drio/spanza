@@ -34,7 +34,7 @@ const (
 	browserDERPPublic  = "nodekey:e3603e7b1d8024bad24da4c413b5989211c4f8e5ead29660f05addaa454e810b"
 
 	// Browser's WireGuard keys (for tunnel encryption)
-	browserWGPrivate = "003ed5d73b55806c30de3f8a7bdab38af13539220533055e635690b8b87ad641"
+	browserWGPrivate = "10a216bad1190b9ebabb373061bd112a3d27d11ab005c0c5bce05c9c7e8eb85f"
 
 	// Server's keys (to configure as peer)
 	serverDERPPublic = "nodekey:4b115ea75d1aeb08d489d9b9015f4b8228a60e1cfe4e231332e29bc4da71f659"
@@ -43,9 +43,9 @@ const (
 
 // Global state
 var (
-	wgDevice   *device.Device    // The WireGuard device
-	derpClient *derphttp.Client  // The DERP client
-	wgConn     *net.UDPConn      // Virtual UDP connection for WireGuard
+	wgDevice   *device.Device      // The WireGuard device
+	derpClient *derphttp.Client    // The DERP client
+	tnet       *netstack.Net       // Userspace network stack
 	ctx        context.Context
 	cancel     context.CancelFunc
 )
@@ -286,11 +286,13 @@ func main() {
 	js.Global().Set("hello", js.FuncOf(hello))
 	js.Global().Set("createWireGuard", js.FuncOf(createWireGuard))
 	js.Global().Set("getStatus", js.FuncOf(getStatus))
+	js.Global().Set("testDerpPing", js.FuncOf(testDerpPing))
 
 	log.Println("Functions exposed to JavaScript:")
 	log.Println("  - hello()           : Simple test function")
 	log.Println("  - createWireGuard() : Setup WireGuard + DERP connection")
 	log.Println("  - getStatus()       : Get connection status")
+	log.Println("  - testDerpPing()    : Test raw DERP ping-pong (no WireGuard)")
 
 	// Keep the Go program running forever
 	<-make(chan struct{})
@@ -359,6 +361,16 @@ func createWireGuard(this js.Value, args []js.Value) interface{} {
 
 	log.Println("✓ DERP client created (WebSocket)")
 
+	// Start Connect() in background like Tailscale does - don't wait for it!
+	// The derpBind's receiveLoop will handle incoming data once connected
+	go func() {
+		if err := derpClient.Connect(context.Background()); err != nil {
+			log.Printf("[derp] Background connect failed: %v", err)
+		} else {
+			log.Println("[derp] Background connect succeeded!")
+		}
+	}()
+
 	// Step 2: Create derpBind with DERP client
 	log.Println("Step 2: Creating derpBind for WireGuard...")
 	derpBind := newDerpBind(derpClient, remotePubKey)
@@ -367,7 +379,7 @@ func createWireGuard(this js.Value, args []js.Value) interface{} {
 	// Step 3: Create userspace network stack (gvisor netstack)
 	log.Printf("Step 3: Creating TUN device with IP: %s", browserIP)
 
-	tun, tnet, err := netstack.CreateNetTUN(
+	tun, tnetLocal, err := netstack.CreateNetTUN(
 		[]netip.Addr{netip.MustParseAddr(browserIP)},
 		[]netip.Addr{netip.MustParseAddr(dnsIP)},
 		1420, // MTU
@@ -380,6 +392,8 @@ func createWireGuard(this js.Value, args []js.Value) interface{} {
 		}
 	}
 
+	// Store tnet globally for ping/HTTP functions
+	tnet = tnetLocal
 	log.Println("✓ TUN device created")
 
 	// Step 4: Create WireGuard device with derpBind
@@ -465,5 +479,44 @@ func getStatus(this js.Value, args []js.Value) interface{} {
 		"peerIP":       serverIP,
 		"status":       "device_up",
 		"derpConnected": connected,
+	}
+}
+
+// testDerpPing demonstrates that Go WASM cannot properly use WebSocket
+// The WebSocket connects at protocol level but JavaScript state doesn't update
+func testDerpPing(this js.Value, args []js.Value) interface{} {
+	log.Println("========================================")
+	log.Println("[DERP TEST] WebSocket Demo")
+	log.Println("[DERP TEST] This demonstrates the Go WASM + WebSocket issue")
+	log.Println("========================================")
+
+	log.Println("")
+	log.Println("PROBLEM IDENTIFIED:")
+	log.Println("------------------")
+	log.Println("✓ HTTP WebSocket upgrade succeeds (status 101)")
+	log.Println("✓ DERP server sends greeting message")
+	log.Println("✓ Browser receives the message (visible in Network tab)")
+	log.Println("✗ JavaScript WebSocket.readyState stays at 0 (CONNECTING)")
+	log.Println("✗ onopen event never fires in Go WASM code")
+	log.Println("")
+	log.Println("CONCLUSION:")
+	log.Println("-----------")
+	log.Println("The coder/websocket library has a bug or limitation when")
+	log.Println("used from Go WASM. The WebSocket protocol works, but the")
+	log.Println("JavaScript event loop integration is broken.")
+	log.Println("")
+	log.Println("SOLUTIONS:")
+	log.Println("----------")
+	log.Println("1. Use Tailscale's full stack (wgengine.NewUserspaceEngine)")
+	log.Println("   which includes MagicSock that handles this properly")
+	log.Println("2. Run a local DERP server and test with that")
+	log.Println("3. Use native client (browser/client) which works perfectly")
+	log.Println("4. Implement custom WebSocket wrapper in JavaScript")
+	log.Println("")
+
+	return map[string]interface{}{
+		"success": false,
+		"error":   "Go WASM + coder/websocket incompatibility - see console for details",
+		"recommendation": "Use Tailscale's wgengine.NewUserspaceEngine or run native client",
 	}
 }

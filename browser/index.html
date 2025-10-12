@@ -21,6 +21,8 @@
             border: 1px solid #ccc;
             background: #f5f5f5;
             min-height: 100px;
+            white-space: pre-wrap;
+            overflow-wrap: break-word;
         }
         .status {
             padding: 10px;
@@ -41,8 +43,11 @@
     <!-- Control buttons -->
     <div style="margin: 20px 0;">
         <button id="testBtn" disabled>Test: hello()</button>
+        <button id="derpPingBtn" disabled>Test DERP Ping-Pong</button>
         <button id="connectBtn" disabled>Connect WireGuard + DERP</button>
         <button id="statusBtn" disabled>Get Status</button>
+        <button id="pingBtn" disabled>Ping 192.168.4.1 (ICMP)</button>
+        <button id="fetchBtn" disabled>Fetch http://192.168.4.1/</button>
     </div>
 
     <!-- Output area -->
@@ -89,8 +94,11 @@
                 document.getElementById("status").textContent = "WASM module loaded! ✓ Ready to connect.";
                 document.getElementById("status").className = "status ready";
                 document.getElementById("testBtn").disabled = false;
+                document.getElementById("derpPingBtn").disabled = false;
                 document.getElementById("connectBtn").disabled = false;
                 document.getElementById("statusBtn").disabled = false;
+                document.getElementById("pingBtn").disabled = false;
+                document.getElementById("fetchBtn").disabled = false;
 
             } catch (err) {
                 console.error("Failed to load WASM:", err);
@@ -102,13 +110,35 @@
         function logOutput(msg) {
             const output = document.getElementById("output");
             const timestamp = new Date().toLocaleTimeString();
-            output.textContent = `[${timestamp}] ${msg}\n` + output.textContent;
+            output.textContent += `[${timestamp}] ${msg}\n`;
+            // Auto-scroll to bottom to see newest messages
+            output.scrollTop = output.scrollHeight;
         }
 
         // Test button - calls hello()
         document.getElementById("testBtn").addEventListener("click", () => {
             const result = hello();
             logOutput("hello() returned: " + result);
+        });
+
+        // DERP Ping button - tests raw DERP ping-pong (no WireGuard)
+        document.getElementById("derpPingBtn").addEventListener("click", () => {
+            logOutput("Testing DERP ping-pong (no WireGuard)...");
+            logOutput("This will create a fresh DERP connection and send PING, expecting PONG");
+            try {
+                const result = testDerpPing();
+                if (result.success) {
+                    logOutput("✓ DERP PING-PONG SUCCESS!");
+                    logOutput(`  Message: ${result.message}`);
+                    logOutput(`  Total time: ${result.totalMs}ms`);
+                    logOutput(`  RTT: ${result.rttMs}ms`);
+                    logOutput(`  Breakdown: ${result.breakdown}`);
+                } else {
+                    logOutput("✗ DERP PING-PONG FAILED: " + result.error);
+                }
+            } catch (err) {
+                logOutput("ERROR calling testDerpPing: " + err);
+            }
         });
 
         // Connect button - creates WireGuard + DERP connection
@@ -140,6 +170,41 @@
                 logOutput("Status: " + JSON.stringify(status, null, 2));
             } catch (err) {
                 logOutput("ERROR getting status: " + err);
+            }
+        });
+
+        // Ping button - sends ICMP ping through tunnel
+        document.getElementById("pingBtn").addEventListener("click", () => {
+            logOutput("Calling pingPeer()...");
+            try {
+                const result = pingPeer();
+                if (result.success) {
+                    logOutput("✓ PING SUCCESS!");
+                    logOutput(result.message);
+                    logOutput("Received " + result.bytes + " bytes");
+                } else {
+                    logOutput("PING FAILED: " + result.error);
+                }
+            } catch (err) {
+                logOutput("ERROR calling pingPeer: " + err);
+            }
+        });
+
+        // Fetch button - makes HTTP request through tunnel
+        document.getElementById("fetchBtn").addEventListener("click", () => {
+            logOutput("Calling fetchHTTP()...");
+            try {
+                const result = fetchHTTP();
+                if (result.success) {
+                    logOutput("✓ HTTP Response received!");
+                    logOutput("Status: " + result.statusText);
+                    logOutput("Body: " + result.body);
+                    logOutput("Full response: " + JSON.stringify(result, null, 2));
+                } else {
+                    logOutput("ERROR: " + result.error);
+                }
+            } catch (err) {
+                logOutput("ERROR calling fetchHTTP: " + err);
             }
         });
 

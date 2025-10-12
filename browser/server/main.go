@@ -37,20 +37,20 @@ const (
 )
 
 // Cryptographic keys
-// These keys identify the server peer
+// These keys identify the peers
 const (
-	// Server's DERP keys (for DERP relay identity)
-	serverDERPPrivate = "privkey:a85c6983dd4e96c1e54aed78a21b3e50f26bd2786cbddfb6d01cdd77673bda7d"
-	serverDERPPublic  = "nodekey:4b115ea75d1aeb08d489d9b9015f4b8228a60e1cfe4e231332e29bc4da71f659"
+	// Server peer's DERP keys (for DERP relay identity)
+	peerServerDERPPrivate = "privkey:a85c6983dd4e96c1e54aed78a21b3e50f26bd2786cbddfb6d01cdd77673bda7d"
+	peerServerDERPPublic  = "nodekey:4b115ea75d1aeb08d489d9b9015f4b8228a60e1cfe4e231332e29bc4da71f659"
 
-	// Server's WireGuard keys (for tunnel encryption)
-	serverWGPrivate = "087ec6e14bbed210e7215cdc73468dfa23f080a1bfb8665b2fd809bd99d28379"
-	serverWGPublic  = "f928d4f6c1b86c12f2562c10b07c555c5c57fd00f59e90c8d8d88767271cbf7c"
+	// Server peer's WireGuard keys (for tunnel encryption)
+	peerServerWGPrivate = "087ec6e14bbed210e7215cdc73468dfa23f080a1bfb8665b2fd809bd99d28379"
+	peerServerWGPublic  = "f928d4f6c1b86c12f2562c10b07c555c5c57fd00f59e90c8d8d88767271cbf7c"
 
-	// Browser peer's keys (we need browser's public keys to configure WireGuard peer)
-	browserDERPPublic = "nodekey:e3603e7b1d8024bad24da4c413b5989211c4f8e5ead29660f05addaa454e810b"
-	browserWGPublic   = "c4c8e984c5322c8184c72265b92b250fdb63688705f504ba003c88f03393cf28"
-	browserIP         = "192.168.4.2"
+	// Browser peer's keys (remote peer that will connect to us)
+	peerBrowserDERPPublic = "nodekey:e3603e7b1d8024bad24da4c413b5989211c4f8e5ead29660f05addaa454e810b"
+	peerBrowserWGPublic   = "e87a7b47066777b678929a3663be293c5d1c3fa279efd3606b90beb58cc54060"
+	browserIP             = "192.168.4.2"
 )
 
 func main() {
@@ -114,7 +114,7 @@ public_key=%s
 allowed_ip=%s/32
 endpoint=127.0.0.1:%d
 persistent_keepalive_interval=25
-`, serverWGPrivate, wgPort, browserWGPublic, browserIP, gatewayPort)
+`, peerServerWGPrivate, wgPort, peerBrowserWGPublic, browserIP, gatewayPort)
 
 	log.Println("Configuring WireGuard peer...")
 	if err := dev.IpcSet(wgConfig); err != nil {
@@ -181,13 +181,13 @@ func runSpanzaGateway(ctx context.Context) {
 
 	// Parse our DERP private key
 	var privKey key.NodePrivate
-	if err := privKey.UnmarshalText([]byte(serverDERPPrivate)); err != nil {
+	if err := privKey.UnmarshalText([]byte(peerServerDERPPrivate)); err != nil {
 		log.Fatalf("%s Failed to parse private key: %v", prefix, err)
 	}
 
 	// Parse browser peer's DERP public key
 	var remotePubKey key.NodePublic
-	if err := remotePubKey.UnmarshalText([]byte(browserDERPPublic)); err != nil {
+	if err := remotePubKey.UnmarshalText([]byte(peerBrowserDERPPublic)); err != nil {
 		log.Fatalf("%s Failed to parse remote public key: %v", prefix, err)
 	}
 
@@ -251,9 +251,13 @@ func runSpanzaGateway(ctx context.Context) {
 				continue
 			}
 
+			log.Printf("%s → Received %d bytes from WireGuard, sending to DERP", prefix, n)
+
 			// Send to browser peer via DERP
 			if err := derpClient.Send(remotePubKey, buf[:n]); err != nil {
 				log.Printf("%s DERP send error: %v", prefix, err)
+			} else {
+				log.Printf("%s ✓ Sent %d bytes to browser via DERP", prefix, n)
 			}
 		}
 	}()
@@ -280,10 +284,28 @@ func runSpanzaGateway(ctx context.Context) {
 			// Only handle received packets
 			switch m := msg.(type) {
 			case derp.ReceivedPacket:
-				// Send to WireGuard
+				// Check if this is a DERP test ping message
+				if string(m.Data) == "PING" {
+					log.Printf("%s [DERP TEST] ← Received PING from %s", prefix, m.Source.ShortString())
+					log.Printf("%s [DERP TEST] → Sending PONG", prefix)
+
+					// Send PONG response immediately
+					pongMsg := []byte("PONG")
+					if err := derpClient.Send(m.Source, pongMsg); err != nil {
+						log.Printf("%s [DERP TEST] Failed to send PONG: %v", prefix, err)
+					} else {
+						log.Printf("%s [DERP TEST] ✓ PONG sent successfully", prefix)
+					}
+					continue // Don't forward to WireGuard
+				}
+
+				// Normal WireGuard packet - forward to WireGuard
+				log.Printf("%s ← Received %d bytes from DERP, forwarding to WireGuard", prefix, len(m.Data))
 				_, err := udpConn.WriteToUDP(m.Data, wgAddr)
 				if err != nil {
 					log.Printf("%s UDP write error: %v", prefix, err)
+				} else {
+					log.Printf("%s ✓ Forwarded %d bytes to WireGuard", prefix, len(m.Data))
 				}
 			}
 		}
