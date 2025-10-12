@@ -12,3 +12,4 @@ browser/client/client
 browser/server/server
 browser/wasm/main.wasm
 browser/server/main.wasm
+userspace/userspace

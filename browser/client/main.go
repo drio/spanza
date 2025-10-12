@@ -13,13 +13,11 @@ import (
 	"syscall"
 	"time"
 
-	"golang.zx2c4.com/wireguard/conn"
+	"github.com/drio/spanza/gateway"
+	"github.com/drio/spanza/wgbind"
 	"golang.zx2c4.com/wireguard/device"
+	"golang.zx2c4.com/wireguard/tun"
 	"golang.zx2c4.com/wireguard/tun/netstack"
-	"tailscale.com/derp"
-	"tailscale.com/derp/derphttp"
-	"tailscale.com/net/netmon"
-	"tailscale.com/types/key"
 )
 
 // Network configuration
@@ -72,27 +70,8 @@ func main() {
 		cancel()
 	}()
 
-	// Start the Spanza gateway
-	// This proxies UDP packets from WireGuard to DERP and back
-	log.Println("Starting Spanza gateway...")
-	go runSpanzaGateway(ctx)
-
-	// Give gateway a moment to start
-	time.Sleep(500 * time.Millisecond)
-
-	// Start the WireGuard peer
-	log.Println("Starting WireGuard peer...")
-	runWireGuardClient(ctx)
-}
-
-// runWireGuardClient creates the userspace WireGuard device and makes HTTP request
-func runWireGuardClient(ctx context.Context) {
-	log.Printf("Creating userspace WireGuard device on %s...", clientIP)
-
-	// Create userspace network stack (gvisor netstack)
-	// tun: Virtual TUN device for WireGuard to read/write IP packets
-	// tnet: Userspace TCP/IP stack - implements standard Go net interfaces
-	//       We'll use tnet.DialContext() to make HTTP requests
+	// Create userspace network stack first (needed by both WireGuard and Gateway)
+	log.Printf("Creating userspace network stack on %s...", clientIP)
 	tun, tnet, err := netstack.CreateNetTUN(
 		[]netip.Addr{netip.MustParseAddr(clientIP)},
 		[]netip.Addr{netip.MustParseAddr(dnsIP)},
@@ -102,22 +81,67 @@ func runWireGuardClient(ctx context.Context) {
 		log.Fatalf("Failed to create TUN: %v", err)
 	}
 
-	// Create WireGuard device
+	// Start the Spanza gateway
+	// This proxies UDP packets from WireGuard to DERP and back
+	log.Println("Starting Spanza gateway...")
+
+	// Create UDP listener for gateway using userspace networking
+	gatewayUDPAddr := &net.UDPAddr{
+		IP:   net.IPv4zero,
+		Port: gatewayPort,
+	}
+	gatewayUDPConn, err := tnet.ListenUDP(gatewayUDPAddr)
+	if err != nil {
+		log.Fatalf("Failed to create gateway UDP listener: %v", err)
+	}
+	defer gatewayUDPConn.Close()
+
+	// Start gateway
+	go func() {
+		cfg := gateway.Config{
+			Prefix:          "[gateway]",
+			DerpURL:         derpURL,
+			PrivKeyStr:      peerClientDERPPrivate,
+			RemotePubKeyStr: peerServerDERPPublic,
+			WGEndpoint:      fmt.Sprintf("%s:%d", clientIP, wgPort), // Use userspace IP, not localhost
+			Verbose:         false, // Keep quiet for client
+		}
+		if err := gateway.Run(ctx, cfg, gatewayUDPConn); err != nil {
+			log.Printf("[gateway] Error: %v", err)
+		}
+	}()
+
+	// Give gateway a moment to start
+	time.Sleep(500 * time.Millisecond)
+
+	// Start the WireGuard peer
+	log.Println("Starting WireGuard peer...")
+	runWireGuardClient(ctx, tun, tnet)
+}
+
+// runWireGuardClient creates the userspace WireGuard device and makes HTTP request
+func runWireGuardClient(ctx context.Context, tunDev tun.Device, tnet *netstack.Net) {
+	log.Printf("Creating userspace WireGuard device...")
+
+	// Create WireGuard device using NetstackBind for userspace UDP
 	// This wraps the TUN interface and handles WireGuard protocol:
 	// - Encryption/decryption
 	// - Handshakes
 	// - Peer management
-	dev := device.NewDevice(tun, conn.NewDefaultBind(), device.NewLogger(device.LogLevelVerbose, "[wg] "))
+	// NetstackBind allows WireGuard to use userspace UDP (tnet) instead of kernel UDP
+	bind := wgbind.NewNetstackBind(tnet)
+	dev := device.NewDevice(tunDev, bind, device.NewLogger(device.LogLevelVerbose, "[wg] "))
 
 	// Configure WireGuard
 	// This is like running: wg set wg0 private-key ... peer ... allowed-ips ...
+	// Use userspace IP (not localhost) since there's no loopback in userspace network
 	wgConfig := fmt.Sprintf(`private_key=%s
 listen_port=%d
 public_key=%s
 allowed_ip=%s/32
-endpoint=127.0.0.1:%d
+endpoint=%s:%d
 persistent_keepalive_interval=25
-`, peerClientWGPrivate, wgPort, peerServerWGPublic, serverIP, gatewayPort)
+`, peerClientWGPrivate, wgPort, peerServerWGPublic, serverIP, clientIP, gatewayPort)
 
 	log.Println("Configuring WireGuard peer...")
 	if err := dev.IpcSet(wgConfig); err != nil {
@@ -177,124 +201,4 @@ persistent_keepalive_interval=25
 	// Keep running until interrupted
 	<-ctx.Done()
 	dev.Close()
-}
-
-// runSpanzaGateway proxies UDP packets between WireGuard and DERP
-// This is the same gateway logic as in server and ustest
-func runSpanzaGateway(ctx context.Context) {
-	prefix := "[gateway]"
-	log.Printf("%s Starting Spanza gateway (UDP ↔ DERP)...", prefix)
-
-	// Parse our DERP private key
-	var privKey key.NodePrivate
-	if err := privKey.UnmarshalText([]byte(peerClientDERPPrivate)); err != nil {
-		log.Fatalf("%s Failed to parse private key: %v", prefix, err)
-	}
-
-	// Parse server peer's DERP public key
-	var remotePubKey key.NodePublic
-	if err := remotePubKey.UnmarshalText([]byte(peerServerDERPPublic)); err != nil {
-		log.Fatalf("%s Failed to parse remote public key: %v", prefix, err)
-	}
-
-	// Create UDP listener for WireGuard
-	// WireGuard will send packets to this port
-	listenAddr := fmt.Sprintf(":%d", gatewayPort)
-	udpAddr, err := net.ResolveUDPAddr("udp", listenAddr)
-	if err != nil {
-		log.Fatalf("%s Invalid listen address: %v", prefix, err)
-	}
-
-	udpConn, err := net.ListenUDP("udp", udpAddr)
-	if err != nil {
-		log.Fatalf("%s Failed to listen on UDP: %v", prefix, err)
-	}
-	defer udpConn.Close()
-
-	log.Printf("%s Listening on UDP port %d", prefix, gatewayPort)
-
-	// WireGuard endpoint (where to send received DERP packets)
-	wgEndpoint := fmt.Sprintf("127.0.0.1:%d", wgPort)
-	wgAddr, err := net.ResolveUDPAddr("udp", wgEndpoint)
-	if err != nil {
-		log.Fatalf("%s Invalid WireGuard endpoint: %v", prefix, err)
-	}
-
-	// Create DERP client
-	netMon := netmon.NewStatic()
-	logf := func(format string, args ...any) {
-		// Suppress verbose DERP logs
-		// Uncomment for debugging:
-		// log.Printf("[derp] "+format, args...)
-	}
-
-	derpClient, err := derphttp.NewClient(privKey, derpURL, logf, netMon)
-	if err != nil {
-		log.Fatalf("%s Failed to create DERP client: %v", prefix, err)
-	}
-	defer derpClient.Close()
-
-	log.Printf("%s Connected to DERP server", prefix)
-	log.Printf("%s Gateway ready (WireGuard:%d ↔ DERP)", prefix, wgPort)
-
-	// Goroutine: UDP → DERP
-	// Read packets from WireGuard, send to DERP
-	go func() {
-		buf := make([]byte, 65535)
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			default:
-			}
-
-			n, _, err := udpConn.ReadFromUDP(buf)
-			if err != nil {
-				if ctx.Err() != nil {
-					return
-				}
-				log.Printf("%s UDP read error: %v", prefix, err)
-				continue
-			}
-
-			// Send to server peer via DERP
-			if err := derpClient.Send(remotePubKey, buf[:n]); err != nil {
-				log.Printf("%s DERP send error: %v", prefix, err)
-			}
-		}
-	}()
-
-	// Goroutine: DERP → UDP
-	// Receive packets from DERP, send to WireGuard
-	go func() {
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			default:
-			}
-
-			msg, err := derpClient.Recv()
-			if err != nil {
-				if ctx.Err() != nil {
-					return
-				}
-				log.Printf("%s DERP recv error: %v", prefix, err)
-				continue
-			}
-
-			// Only handle received packets
-			switch m := msg.(type) {
-			case derp.ReceivedPacket:
-				// Send to WireGuard
-				_, err := udpConn.WriteToUDP(m.Data, wgAddr)
-				if err != nil {
-					log.Printf("%s UDP write error: %v", prefix, err)
-				}
-			}
-		}
-	}()
-
-	<-ctx.Done()
-	log.Printf("%s Gateway shutting down", prefix)
 }

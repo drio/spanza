@@ -12,11 +12,11 @@ import (
 	"tailscale.com/types/key"
 )
 
-// UDPConn is an interface that both *net.UDPConn and *netstack.UDPConn satisfy.
+// UDPConn is an interface that both *net.UDPConn and *gonet.UDPConn satisfy.
 // This allows the gateway to work with either kernel UDP or userspace UDP.
 type UDPConn interface {
-	ReadFromUDP([]byte) (int, *net.UDPAddr, error)
-	WriteToUDP([]byte, *net.UDPAddr) (int, error)
+	ReadFrom([]byte) (int, net.Addr, error)
+	WriteTo([]byte, net.Addr) (int, error)
 	Close() error
 }
 
@@ -92,7 +92,7 @@ func Run(ctx context.Context, cfg Config, udpConn UDPConn) error {
 	log.Printf("%s Gateway ready (UDP ↔ DERP)", prefix)
 
 	// Close UDP connection when context is cancelled
-	// This will wake up any blocked ReadFromUDP calls cleanly
+	// This will wake up any blocked ReadFrom calls cleanly
 	go func() {
 		<-ctx.Done()
 		udpConn.Close()
@@ -109,7 +109,7 @@ func Run(ctx context.Context, cfg Config, udpConn UDPConn) error {
 			default:
 			}
 
-			n, _, err := udpConn.ReadFromUDP(buf)
+			n, _, err := udpConn.ReadFrom(buf)
 			if err != nil {
 				// Connection closed (context cancellation closes udpConn)
 				return
@@ -154,7 +154,7 @@ func Run(ctx context.Context, cfg Config, udpConn UDPConn) error {
 					log.Printf("%s ← Received %d bytes from DERP, forwarding to WireGuard", prefix, len(m.Data))
 				}
 
-				_, err := udpConn.WriteToUDP(m.Data, wgAddr)
+				_, err := udpConn.WriteTo(m.Data, wgAddr)
 				if err != nil {
 					log.Printf("%s UDP write error: %v", prefix, err)
 				} else if cfg.Verbose {
