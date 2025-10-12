@@ -10,5 +10,5 @@ playground/wg/wgplay
 userspace/ustest
 browser/client/client
 browser/server/server
-browser/wasm/main.go
 browser/wasm/main.wasm
+browser/server/main.wasm
