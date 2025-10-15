@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"io"
 	"log"
@@ -14,8 +15,9 @@ import (
 	"time"
 
 	"github.com/drio/spanza/gateway"
-	"golang.zx2c4.com/wireguard/conn"
+	"github.com/drio/spanza/wgbind"
 	"golang.zx2c4.com/wireguard/device"
+	"golang.zx2c4.com/wireguard/tun"
 	"golang.zx2c4.com/wireguard/tun/netstack"
 )
 
@@ -51,7 +53,15 @@ const (
 )
 
 func main() {
-	log.Println("Starting WireGuard server peer for browser testing...")
+	// Parse command-line flags
+	testDerp := flag.Bool("test-derp", false, "Run in DERP-only test mode (no WireGuard)")
+	flag.Parse()
+
+	if *testDerp {
+		log.Println("Starting server in DERP-only test mode...")
+	} else {
+		log.Println("Starting WireGuard server peer for browser testing...")
+	}
 
 	// Create a context that we can cancel on shutdown
 	ctx, cancel := context.WithCancel(context.Background())
@@ -66,16 +76,27 @@ func main() {
 		cancel()
 	}()
 
+	// Create userspace network stack first (needed by both WireGuard and Gateway)
+	log.Printf("Creating userspace network stack on %s...", serverIP)
+	tun, tnet, err := netstack.CreateNetTUN(
+		[]netip.Addr{netip.MustParseAddr(serverIP)},
+		[]netip.Addr{netip.MustParseAddr(dnsIP)},
+		1420, // MTU
+	)
+	if err != nil {
+		log.Fatalf("Failed to create TUN: %v", err)
+	}
+
 	// Start the Spanza gateway
 	// This proxies UDP packets from WireGuard to DERP and back
 	log.Println("Starting Spanza gateway...")
 
-	// Create UDP listener for gateway
-	gatewayUDPAddr, err := net.ResolveUDPAddr("udp", fmt.Sprintf(":%d", gatewayPort))
-	if err != nil {
-		log.Fatalf("Failed to resolve gateway UDP address: %v", err)
+	// Create UDP listener for gateway using userspace networking
+	gatewayUDPAddr := &net.UDPAddr{
+		IP:   net.IPv4zero,
+		Port: gatewayPort,
 	}
-	gatewayUDPConn, err := net.ListenUDP("udp", gatewayUDPAddr)
+	gatewayUDPConn, err := tnet.ListenUDP(gatewayUDPAddr)
 	if err != nil {
 		log.Fatalf("Failed to create gateway UDP listener: %v", err)
 	}
@@ -88,7 +109,7 @@ func main() {
 			DerpURL:         derpURL,
 			PrivKeyStr:      peerServerDERPPrivate,
 			RemotePubKeyStr: peerBrowserDERPPublic,
-			WGEndpoint:      fmt.Sprintf("127.0.0.1:%d", wgPort),
+			WGEndpoint:      fmt.Sprintf("%s:%d", serverIP, wgPort), // Use userspace IP, not localhost
 			Verbose:         true, // Enable verbose logging for server
 		}
 		if err := gateway.Run(ctx, cfg, gatewayUDPConn); err != nil {
@@ -99,44 +120,39 @@ func main() {
 	// Give gateway a moment to start
 	time.Sleep(500 * time.Millisecond)
 
-	// Start the WireGuard peer with HTTP server
-	log.Println("Starting WireGuard peer...")
-	runWireGuardPeer(ctx)
+	if *testDerp {
+		// Run in test mode: echo server instead of WireGuard
+		log.Println("Starting UDP echo server (test mode)...")
+		runTestEchoServer(ctx, tnet)
+	} else {
+		// Normal mode: Start the WireGuard peer with HTTP server
+		log.Println("Starting WireGuard peer...")
+		runWireGuardPeer(ctx, tun, tnet)
+	}
 }
 
 // runWireGuardPeer creates the userspace WireGuard device and HTTP server
-func runWireGuardPeer(ctx context.Context) {
+func runWireGuardPeer(ctx context.Context, tunDev tun.Device, tnet *netstack.Net) {
 	log.Printf("Creating userspace WireGuard device on %s...", serverIP)
 
-	// Create userspace network stack (gvisor netstack)
-	// tun: Virtual TUN device for WireGuard to read/write IP packets
-	// tnet: Userspace TCP/IP stack - implements standard Go net interfaces
-	//       We'll use tnet.ListenTCP() to create our HTTP server
-	tun, tnet, err := netstack.CreateNetTUN(
-		[]netip.Addr{netip.MustParseAddr(serverIP)},
-		[]netip.Addr{netip.MustParseAddr(dnsIP)},
-		1420, // MTU
-	)
-	if err != nil {
-		log.Fatalf("Failed to create TUN: %v", err)
-	}
-
-	// Create WireGuard device
+	// Create WireGuard device using NetstackBind for userspace UDP
 	// This wraps the TUN interface and handles WireGuard protocol:
 	// - Encryption/decryption
 	// - Handshakes
 	// - Peer management
-	dev := device.NewDevice(tun, conn.NewDefaultBind(), device.NewLogger(device.LogLevelSilent, ""))
+	bind := wgbind.NewNetstackBind(tnet, serverIP)
+	dev := device.NewDevice(tunDev, bind, device.NewLogger(device.LogLevelVerbose, "[wg-server] "))
 
 	// Configure WireGuard
 	// This is like running: wg set wg0 private-key ... peer ... allowed-ips ...
+	// Use userspace IP (not localhost) since there's no loopback in userspace network
 	wgConfig := fmt.Sprintf(`private_key=%s
 listen_port=%d
 public_key=%s
-allowed_ip=%s/32
-endpoint=127.0.0.1:%d
+allowed_ip=0.0.0.0/0
+endpoint=%s:%d
 persistent_keepalive_interval=25
-`, peerServerWGPrivate, wgPort, peerBrowserWGPublic, browserIP, gatewayPort)
+`, peerServerWGPrivate, wgPort, peerBrowserWGPublic, serverIP, gatewayPort)
 
 	log.Println("Configuring WireGuard peer...")
 	if err := dev.IpcSet(wgConfig); err != nil {
@@ -192,5 +208,59 @@ persistent_keepalive_interval=25
 
 	if err := srv.Serve(listener); err != nil && err != http.ErrServerClosed {
 		log.Printf("HTTP server error: %v", err)
+	}
+}
+
+// runTestEchoServer runs a simple UDP echo server for DERP testing
+// This bypasses WireGuard to test if DERP communication works bidirectionally
+func runTestEchoServer(ctx context.Context, tnet *netstack.Net) {
+	log.Printf("Creating UDP echo server on %s:%d...", serverIP, wgPort)
+
+	echoAddr := &net.UDPAddr{
+		IP:   net.ParseIP(serverIP),
+		Port: wgPort, // Use WireGuard port for testing
+	}
+	echoConn, err := tnet.ListenUDP(echoAddr)
+	if err != nil {
+		log.Fatalf("Failed to create echo UDP socket: %v", err)
+	}
+	defer echoConn.Close()
+
+	log.Printf("✓ Echo server listening on %s:%d", serverIP, wgPort)
+	log.Println("")
+	log.Println("Echo server ready! Will echo back any received packets.")
+	log.Println("Browser can now call testDerpOnly() to test DERP communication.")
+	log.Println("")
+
+	// Simple echo loop
+	buf := make([]byte, 2048)
+	for {
+		select {
+		case <-ctx.Done():
+			log.Println("Echo server shutting down...")
+			return
+		default:
+		}
+
+		n, addr, err := echoConn.ReadFrom(buf)
+		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			log.Printf("[echo] Read error: %v", err)
+			continue
+		}
+
+		data := string(buf[:n])
+		log.Printf("[echo] ✓ Received %d bytes from %s: %q", n, addr, data)
+
+		// Echo back the same data
+		n2, err := echoConn.WriteTo(buf[:n], addr)
+		if err != nil {
+			log.Printf("[echo] Write error: %v", err)
+			continue
+		}
+
+		log.Printf("[echo] → Echoed back %d bytes to %s", n2, addr)
 	}
 }

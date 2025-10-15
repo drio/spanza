@@ -1,6 +1,7 @@
 package wgbind
 
 import (
+	"log"
 	"net"
 	"net/netip"
 	"sync"
@@ -16,51 +17,56 @@ import (
 // Unlike StdNetBind which uses kernel UDP (net.ListenUDP), NetstackBind uses
 // the userspace network stack (tnet.ListenUDP) from netstack.
 type NetstackBind struct {
-	mu   sync.Mutex
-	tnet *netstack.Net
-	conn *gonet.UDPConn
+	mu       sync.Mutex
+	tnet     *netstack.Net
+	conn     *gonet.UDPConn
+	localIP  netip.Addr      // Local IP address for this bind
+	localPort uint16         // Local port for this bind
 }
 
 var _ conn.Bind = (*NetstackBind)(nil)
 
 // NewNetstackBind creates a new Bind that uses userspace UDP from the provided
 // netstack.Net. The tnet parameter comes from netstack.CreateNetTUN().
-func NewNetstackBind(tnet *netstack.Net) conn.Bind {
+// The localIP parameter specifies the local IP address to use (e.g., "192.168.4.2").
+func NewNetstackBind(tnet *netstack.Net, localIP string) conn.Bind {
+	ip, _ := netip.ParseAddr(localIP)
 	return &NetstackBind{
-		tnet: tnet,
+		tnet:    tnet,
+		localIP: ip,
 	}
 }
 
 // NetstackEndpoint represents a UDP endpoint for the netstack bind.
 type NetstackEndpoint struct {
-	addr netip.AddrPort
+	dst netip.AddrPort // Destination address (remote peer)
+	src netip.AddrPort // Source address (local interface)
 }
 
 var _ conn.Endpoint = (*NetstackEndpoint)(nil)
 
 func (e *NetstackEndpoint) ClearSrc() {
-	// No-op for simple implementation
+	e.src = netip.AddrPort{}
 }
 
 func (e *NetstackEndpoint) DstIP() netip.Addr {
-	return e.addr.Addr()
+	return e.dst.Addr()
 }
 
 func (e *NetstackEndpoint) SrcIP() netip.Addr {
-	// Return unspecified since we don't track source in simple implementation
-	return netip.Addr{}
+	return e.src.Addr()
 }
 
 func (e *NetstackEndpoint) SrcToString() string {
-	return ""
+	return e.src.String()
 }
 
 func (e *NetstackEndpoint) DstToString() string {
-	return e.addr.String()
+	return e.dst.String()
 }
 
 func (e *NetstackEndpoint) DstToBytes() []byte {
-	b, _ := e.addr.MarshalBinary()
+	b, _ := e.dst.MarshalBinary()
 	return b
 }
 
@@ -86,9 +92,12 @@ func (b *NetstackBind) Open(port uint16) ([]conn.ReceiveFunc, uint16, error) {
 
 	b.conn = udpConn
 
-	// Get the actual port we bound to
+	// Get the actual port we bound to and extract local address
 	localAddr := udpConn.LocalAddr().(*net.UDPAddr)
 	actualPort := uint16(localAddr.Port)
+	b.localPort = actualPort
+
+	log.Printf("[wgbind] Bound to %s:%d", b.localIP, actualPort)
 
 	// Return a single receive function
 	recvFn := func(bufs [][]byte, sizes []int, eps []conn.Endpoint) (int, error) {
@@ -122,8 +131,21 @@ func (b *NetstackBind) receive(bufs [][]byte, sizes []int, eps []conn.Endpoint) 
 	if !ok {
 		return 0, net.ErrClosed
 	}
-	addrPort := udpAddr.AddrPort()
-	eps[0] = &NetstackEndpoint{addr: addrPort}
+
+	// The address from ReadFrom is the SOURCE of the packet (where it came from)
+	// This becomes the DESTINATION for our replies (dst)
+	dstAddrPort := udpAddr.AddrPort()
+
+	// For source, use our configured local address
+	srcAddrPort := netip.AddrPortFrom(b.localIP, b.localPort)
+
+	eps[0] = &NetstackEndpoint{
+		dst: dstAddrPort,
+		src: srcAddrPort,
+	}
+
+	log.Printf("[wgbind] Received %d bytes from %s", n, dstAddrPort)
+	log.Printf("[wgbind] Endpoint - Src: %s, Dst: %s", srcAddrPort, dstAddrPort)
 
 	return 1, nil
 }
@@ -158,26 +180,33 @@ func (b *NetstackBind) Send(bufs [][]byte, endpoint conn.Endpoint) error {
 	}
 
 	// Convert netip.AddrPort to *net.UDPAddr
-	addr := net.UDPAddrFromAddrPort(ep.addr)
+	// Send to the destination (remote peer)
+	addr := net.UDPAddrFromAddrPort(ep.dst)
 
 	// Simple implementation: send packets one at a time
 	for _, buf := range bufs {
-		_, err := udpConn.WriteTo(buf, addr)
+		n, err := udpConn.WriteTo(buf, addr)
 		if err != nil {
 			return err
 		}
+		log.Printf("[wgbind] Sent %d bytes to %s", n, addr)
 	}
 
 	return nil
 }
 
 // ParseEndpoint parses a string into an endpoint.
+// The parsed address becomes the destination (remote peer).
 func (b *NetstackBind) ParseEndpoint(s string) (conn.Endpoint, error) {
 	addr, err := netip.ParseAddrPort(s)
 	if err != nil {
 		return nil, err
 	}
-	return &NetstackEndpoint{addr: addr}, nil
+	// Destination is the parsed address (remote peer)
+	// Source will be set when we receive packets
+	return &NetstackEndpoint{
+		dst: addr,
+	}, nil
 }
 
 // SetMark is a no-op for userspace networking.

@@ -15,6 +15,13 @@ run: build
 	@echo ""
 	./server
 
+# Run the server (no wireguard)
+run/derp-only: build
+	@echo "Starting server peer (derp only; no wireguard)..."
+	@echo ""
+	./server --test-derp
+
+
 # Clean build artifacts
 clean:
 	@echo "Cleaning..."

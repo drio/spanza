@@ -26,9 +26,9 @@ type Config struct {
 	Prefix string
 
 	// DERP configuration
-	DerpURL          string // e.g., "https://derp.tailscale.com/derp"
-	PrivKeyStr       string // This peer's DERP private key (e.g., "privkey:...")
-	RemotePubKeyStr  string // Remote peer's DERP public key (e.g., "nodekey:...")
+	DerpURL         string // e.g., "https://derp.tailscale.com/derp"
+	PrivKeyStr      string // This peer's DERP private key (e.g., "privkey:...")
+	RemotePubKeyStr string // Remote peer's DERP public key (e.g., "nodekey:...")
 
 	// WireGuard endpoint to forward received DERP packets to
 	WGEndpoint string // e.g., "127.0.0.1:51820"
@@ -91,11 +91,12 @@ func Run(ctx context.Context, cfg Config, udpConn UDPConn) error {
 	log.Printf("%s DERP client created (connection will happen automatically)", prefix)
 	log.Printf("%s Gateway ready (UDP ↔ DERP)", prefix)
 
-	// Close UDP connection when context is cancelled
-	// This will wake up any blocked ReadFrom calls cleanly
+	// Close connections when context is cancelled
+	// This will wake up any blocked ReadFrom/Recv calls cleanly
 	go func() {
 		<-ctx.Done()
 		udpConn.Close()
+		derpClient.Close() // This will interrupt the blocking Recv() call
 	}()
 
 	// Goroutine: UDP → DERP
@@ -116,7 +117,7 @@ func Run(ctx context.Context, cfg Config, udpConn UDPConn) error {
 			}
 
 			if cfg.Verbose {
-				log.Printf("%s → Received %d bytes from WireGuard, sending to DERP", prefix, n)
+				log.Printf("%s → Received %d bytes in the UDP connection, sending to DERP", prefix, n)
 			}
 
 			// Send to remote peer via DERP
@@ -131,34 +132,39 @@ func Run(ctx context.Context, cfg Config, udpConn UDPConn) error {
 	// Goroutine: DERP → UDP
 	// Receive packets from DERP, send to WireGuard
 	go func() {
+		log.Printf("%s DERP receive loop started", prefix)
 		for {
 			select {
 			case <-ctx.Done():
+				log.Printf("%s DERP receive loop exiting (context done)", prefix)
 				return
 			default:
 			}
 
+			log.Printf("%s Waiting for DERP message...", prefix)
 			msg, err := derpClient.Recv()
 			if err != nil {
 				if ctx.Err() != nil {
+					log.Printf("%s DERP receive loop exiting (context error)", prefix)
 					return
 				}
 				log.Printf("%s DERP recv error: %v", prefix, err)
 				continue
 			}
 
+			log.Printf("%s Received DERP message type: %T", prefix, msg)
 			// Only handle received packets
 			switch m := msg.(type) {
 			case derp.ReceivedPacket:
 				if cfg.Verbose {
-					log.Printf("%s ← Received %d bytes from DERP, forwarding to WireGuard", prefix, len(m.Data))
+					log.Printf("%s ← Received %d bytes from DERP, writing to UDP connection", prefix, len(m.Data))
 				}
 
 				_, err := udpConn.WriteTo(m.Data, wgAddr)
 				if err != nil {
 					log.Printf("%s UDP write error: %v", prefix, err)
 				} else if cfg.Verbose {
-					log.Printf("%s ✓ Forwarded %d bytes to WireGuard", prefix, len(m.Data))
+					log.Printf("%s ✓ Wrote %d bytes to UDP connection", prefix, len(m.Data))
 				}
 			}
 		}

@@ -129,7 +129,7 @@ func runWireGuardClient(ctx context.Context, tunDev tun.Device, tnet *netstack.N
 	// - Handshakes
 	// - Peer management
 	// NetstackBind allows WireGuard to use userspace UDP (tnet) instead of kernel UDP
-	bind := wgbind.NewNetstackBind(tnet)
+	bind := wgbind.NewNetstackBind(tnet, clientIP)
 	dev := device.NewDevice(tunDev, bind, device.NewLogger(device.LogLevelVerbose, "[wg] "))
 
 	// Configure WireGuard

@@ -1,5 +1,6 @@
 <!DOCTYPE html>
 <html>
+
 <head>
     <meta charset="utf-8">
     <title>Spanza WASM Test</title>
@@ -10,11 +11,13 @@
             margin: 50px auto;
             padding: 20px;
         }
+
         button {
             padding: 10px 20px;
             font-size: 16px;
             cursor: pointer;
         }
+
         #output {
             margin-top: 20px;
             padding: 10px;
@@ -24,16 +27,27 @@
             white-space: pre-wrap;
             overflow-wrap: break-word;
         }
+
         .status {
             padding: 10px;
             margin-bottom: 20px;
             border-radius: 4px;
         }
-        .loading { background: #fff3cd; }
-        .ready { background: #d4edda; }
-        .error { background: #f8d7da; }
+
+        .loading {
+            background: #fff3cd;
+        }
+
+        .ready {
+            background: #d4edda;
+        }
+
+        .error {
+            background: #f8d7da;
+        }
     </style>
 </head>
+
 <body>
     <h1>Spanza WASM Test</h1>
 
@@ -43,6 +57,7 @@
     <!-- Control buttons -->
     <div style="margin: 20px 0;">
         <button id="testBtn" disabled>Test: hello()</button>
+        <button id="testDerp" disabled>Test derp only</button>
         <button id="derpPingBtn" disabled>Test DERP Ping-Pong</button>
         <button id="connectBtn" disabled>Connect WireGuard + DERP</button>
         <button id="statusBtn" disabled>Get Status</button>
@@ -94,6 +109,7 @@
                 document.getElementById("status").textContent = "WASM module loaded! ✓ Ready to connect.";
                 document.getElementById("status").className = "status ready";
                 document.getElementById("testBtn").disabled = false;
+                document.getElementById("testDerp").disabled = false;
                 document.getElementById("derpPingBtn").disabled = false;
                 document.getElementById("connectBtn").disabled = false;
                 document.getElementById("statusBtn").disabled = false;
@@ -140,6 +156,18 @@
                 logOutput("ERROR calling testDerpPing: " + err);
             }
         });
+
+        // TestDerpOnly
+        document.getElementById("testDerp").addEventListener("click", () => {
+            logOutput("Calling testDerpOnly()...");
+            try {
+                const result = testDerpOnly();
+                logOutput("testDerpOnly() result: " + JSON.stringify(result, null, 2));
+            } catch (err) {
+                logOutput("ERROR: " + err);
+            }
+        });
+
 
         // Connect button - creates WireGuard + DERP connection
         document.getElementById("connectBtn").addEventListener("click", () => {
@@ -212,4 +240,5 @@
         loadWasm();
     </script>
 </body>
+
 </html>
