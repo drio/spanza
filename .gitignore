@@ -2,15 +2,25 @@ node_modules
 *.vim
 .env*
 *.mp4
+
+# Compiled binaries
 spanza
+userspace/ustest
+userspace/userspace
+browser/client/client
+browser/server/server
+browser/client/.syncthing.client.tmp
+
+# WASM binaries
+browser/wasm/main.wasm
+browser/server/main.wasm
+
+# Playground binaries
 playground/wg/wg-server
 playground/wg/wg-client
 playground/wg/wg-combined
 playground/wg/wgplay
-userspace/ustest
-browser/client/client
-browser/server/server
-browser/wasm/main.wasm
-browser/server/main.wasm
-userspace/userspace
-browser/client/.syncthing.client.tmp
+playground/derp/derper/derper
+playground/derp/bin/clientA
+playground/derp/bin/clientB
+playground/derp/bin/keygen
