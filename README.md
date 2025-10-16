@@ -13,4 +13,5 @@ There is currently a lot of exploratory work in userspace but you have a working
 (stanza) which you can use to send your wg traffic over DERP. You just need to run the stanza process
 and point your wg configuration to use stanza instead of the peer endpoint.
 
-Still under heavy development but may be useful to some.
+Still under heavy development but I wanted to put it out there to get feedback. It also already functional
+and useful.
