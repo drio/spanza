@@ -134,7 +134,7 @@ func runWireGuardPeer(ctx context.Context, tunDev tun.Device, tnet *netstack.Net
 	// - Handshakes
 	// - Peer management
 	// DerpBind uses DERP directly for all communication (like Tailscale in WASM)
-	dev := device.NewDevice(tunDev, derpBind, device.NewLogger(device.LogLevelVerbose, "[wg-server] "))
+	dev := device.NewDevice(tunDev, derpBind, device.NewLogger(device.LogLevelSilent, "[wg-server] "))
 
 	// Configure WireGuard
 	// Note: NO listen_port (we're not using UDP)

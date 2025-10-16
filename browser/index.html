@@ -57,8 +57,6 @@
     <!-- Control buttons -->
     <div style="margin: 20px 0;">
         <button id="testBtn" disabled>Test: hello()</button>
-        <button id="testDerp" disabled>Test derp only</button>
-        <button id="derpPingBtn" disabled>Test DERP Ping-Pong</button>
         <button id="connectBtn" disabled>Connect WireGuard + DERP</button>
         <button id="statusBtn" disabled>Get Status</button>
         <button id="pingBtn" disabled>Ping 192.168.4.1 (ICMP)</button>
@@ -109,8 +107,6 @@
                 document.getElementById("status").textContent = "WASM module loaded! ✓ Ready to connect.";
                 document.getElementById("status").className = "status ready";
                 document.getElementById("testBtn").disabled = false;
-                document.getElementById("testDerp").disabled = false;
-                document.getElementById("derpPingBtn").disabled = false;
                 document.getElementById("connectBtn").disabled = false;
                 document.getElementById("statusBtn").disabled = false;
                 document.getElementById("pingBtn").disabled = false;
@@ -135,37 +131,6 @@
         document.getElementById("testBtn").addEventListener("click", () => {
             const result = hello();
             logOutput("hello() returned: " + result);
-        });
-
-        // DERP Ping button - tests raw DERP ping-pong (no WireGuard)
-        document.getElementById("derpPingBtn").addEventListener("click", () => {
-            logOutput("Testing DERP ping-pong (no WireGuard)...");
-            logOutput("This will create a fresh DERP connection and send PING, expecting PONG");
-            try {
-                const result = testDerpPing();
-                if (result.success) {
-                    logOutput("✓ DERP PING-PONG SUCCESS!");
-                    logOutput(`  Message: ${result.message}`);
-                    logOutput(`  Total time: ${result.totalMs}ms`);
-                    logOutput(`  RTT: ${result.rttMs}ms`);
-                    logOutput(`  Breakdown: ${result.breakdown}`);
-                } else {
-                    logOutput("✗ DERP PING-PONG FAILED: " + result.error);
-                }
-            } catch (err) {
-                logOutput("ERROR calling testDerpPing: " + err);
-            }
-        });
-
-        // TestDerpOnly
-        document.getElementById("testDerp").addEventListener("click", () => {
-            logOutput("Calling testDerpOnly()...");
-            try {
-                const result = testDerpOnly();
-                logOutput("testDerpOnly() result: " + JSON.stringify(result, null, 2));
-            } catch (err) {
-                logOutput("ERROR: " + err);
-            }
         });
 
 

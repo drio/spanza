@@ -5,13 +5,12 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"net"
 	"net/http"
 	"net/netip"
+	"strings"
 	"syscall/js"
 	"time"
 
-	"github.com/drio/spanza/gateway"
 	"github.com/drio/spanza/wgbind"
 	"golang.zx2c4.com/wireguard/device"
 	"golang.zx2c4.com/wireguard/tun"
@@ -30,10 +29,6 @@ const (
 	browserIP = "192.168.4.2"
 	serverIP  = "192.168.4.1"
 	dnsIP     = "8.8.8.8"
-
-	// Ports for WireGuard and Spanza gateway
-	wgPort      = 51822 // WireGuard listens here (userspace UDP)
-	gatewayPort = 51823 // Spanza gateway listens here (userspace UDP)
 
 	// Browser's DERP keys (for DERP relay identity)
 	browserDERPPrivate = "privkey:503685023b6d449ea3ade66f9348778666bf2fae863580e86124e7388b4bc37c"
@@ -66,17 +61,16 @@ func main() {
 	// Expose functions to JavaScript
 	js.Global().Set("hello", js.FuncOf(hello))
 	js.Global().Set("createWireGuard", js.FuncOf(createWireGuard))
-	js.Global().Set("testDerpOnly", js.FuncOf(testDerpOnly))
 	js.Global().Set("getStatus", js.FuncOf(getStatus))
 	js.Global().Set("fetchHTTP", js.FuncOf(fetchHTTP))
 	js.Global().Set("pingPeer", js.FuncOf(pingPeer))
 
 	log.Println("Functions exposed to JavaScript:")
 	log.Println("  - hello()           : Simple test function")
-	log.Println("  - createWireGuard() : Setup WireGuard + DerpBind + DERP connection (WASM mode)")
-	log.Println("  - testDerpOnly()    : Test DERP communication only (no WireGuard)")
+	log.Println("  - createWireGuard() : Setup WireGuard + DerpBind + DERP connection")
 	log.Println("  - getStatus()       : Get connection status")
 	log.Println("  - fetchHTTP()       : Fetch HTTP through tunnel")
+	log.Println("  - pingPeer()        : Test connection to peer")
 
 	// Keep the Go program running forever
 	<-make(chan struct{})
@@ -133,6 +127,9 @@ func createWireGuard(this js.Value, args []js.Value) interface{} {
 		return errorResponse(err.Error())
 	}
 
+	// Step 6: Wait for handshake to complete
+	waitForHandshake()
+
 	printSuccessMessage()
 
 	return map[string]interface{}{
@@ -147,41 +144,54 @@ func createWireGuard(this js.Value, args []js.Value) interface{} {
 
 // createDerpBind creates and configures the DERP client and bind
 func createDerpBind() (*wgbind.DerpBind, error) {
-	log.Printf("Step 1: Connecting to DERP server: %s", derpURL)
+	log.Printf("→ Connecting to DERP server: %s", derpURL)
 
 	// Parse our DERP private key
 	var privKey key.NodePrivate
 	if err := privKey.UnmarshalText([]byte(browserDERPPrivate)); err != nil {
-		log.Printf("Failed to parse private key: %v", err)
 		return nil, fmt.Errorf("failed to parse key: %w", err)
 	}
 
 	// Parse server's DERP public key
 	var remotePubKey key.NodePublic
 	if err := remotePubKey.UnmarshalText([]byte(serverDERPPublic)); err != nil {
-		log.Printf("Failed to parse remote public key: %v", err)
 		return nil, fmt.Errorf("failed to parse remote key: %w", err)
 	}
 
 	// Create DERP client (WebSocket used automatically in browser)
 	netMon := netmon.NewStatic()
 	logf := func(format string, args ...any) {
-		log.Printf("[derp] "+format, args...)
+		// Suppress most DERP logging - retries are normal during connection
+		// Only log critical errors, not routine connection attempts
+		msg := fmt.Sprintf(format, args...)
+		if strings.Contains(msg, "context deadline exceeded") {
+			// WebSocket timeout during connection - normal, suppress
+			return
+		}
+		if strings.Contains(msg, "error") || strings.Contains(msg, "failed") {
+			log.Printf("[derp] "+format, args...)
+		}
 	}
 
 	var err error
 	derpClient, err = derphttp.NewClient(privKey, derpURL, logf, netMon)
 	if err != nil {
-		log.Printf("Failed to create DERP client: %v", err)
 		return nil, fmt.Errorf("failed to create DERP client: %w", err)
 	}
 
-	log.Println("✓ DERP client created (connection will establish on first use)")
+	// In WASM/browser, WebSocket connections take longer to establish
+	// Use a 30-second timeout instead of the default 10 seconds
+	derpClient.BaseContext = func() context.Context {
+		ctx, _ := context.WithTimeout(context.Background(), 30*time.Second)
+		return ctx
+	}
+
+	// In WASM/browser, we need to use http.DefaultClient for WebSocket to work
+	derpClient.TLSConfig = nil // Use browser's TLS
 
 	// Create DerpBind for WireGuard
-	log.Println("Step 2: Creating DerpBind for WireGuard...")
 	derpBind := wgbind.NewDerpBind(derpClient, remotePubKey)
-	log.Println("✓ DerpBind created")
+	log.Println("✓ DERP client and DerpBind created")
 
 	return derpBind, nil
 }
@@ -189,7 +199,7 @@ func createDerpBind() (*wgbind.DerpBind, error) {
 // createNetworkStack creates the userspace network stack and TUN device
 // Returns both the TUN device and the network stack for the caller to manage
 func createNetworkStack() (tun.Device, *netstack.Net, error) {
-	log.Printf("Step 3: Creating userspace network stack with IP: %s", browserIP)
+	log.Printf("→ Creating network stack (IP: %s)", browserIP)
 
 	tunDev, tnetLocal, err := netstack.CreateNetTUN(
 		[]netip.Addr{netip.MustParseAddr(browserIP)},
@@ -197,36 +207,32 @@ func createNetworkStack() (tun.Device, *netstack.Net, error) {
 		1420, // MTU
 	)
 	if err != nil {
-		log.Printf("Failed to create network stack: %v", err)
 		return nil, nil, fmt.Errorf("failed to create network stack: %w", err)
 	}
 
-	log.Println("✓ Userspace network stack created")
+	log.Println("✓ Network stack created")
 
 	return tunDev, tnetLocal, nil
 }
 
 // createWireGuardDevice creates the WireGuard device with the given TUN and bind
 func createWireGuardDevice(tunDev tun.Device, derpBind *wgbind.DerpBind) error {
-	log.Println("Step 4: Creating WireGuard device with DERP bind...")
+	log.Println("→ Creating WireGuard device...")
 
 	wgDevice = device.NewDevice(
 		tunDev,
-		derpBind, // ✅ Use DerpBind instead of NetstackBind!
-		device.NewLogger(device.LogLevelVerbose, "[wg] "),
+		derpBind,
+		device.NewLogger(device.LogLevelSilent, "[wg] "),
 	)
 
-	log.Println("✓ WireGuard device created with DERP transport")
+	log.Println("✓ WireGuard device created")
 	return nil
 }
 
 // configureWireGuardPeer configures the WireGuard peer
 func configureWireGuardPeer() error {
-	log.Println("Step 5: Configuring WireGuard peer...")
+	log.Println("→ Configuring WireGuard peer...")
 
-	// We need to specify an endpoint so WireGuard knows where to send packets
-	// ParseEndpoint() will convert this to a DerpEndpoint
-	// The string can be anything - we'll always return our remote peer's endpoint
 	wgConfig := fmt.Sprintf(`private_key=%s
 public_key=%s
 endpoint=%s
@@ -235,40 +241,54 @@ persistent_keepalive_interval=25
 `, browserWGPrivate, serverWGPublic, serverDERPPublic)
 
 	if err := wgDevice.IpcSet(wgConfig); err != nil {
-		log.Printf("Failed to configure WireGuard: %v", err)
 		return fmt.Errorf("failed to configure: %w", err)
 	}
 
-	log.Println("✓ WireGuard configured")
+	log.Println("✓ Peer configured")
 	return nil
 }
 
 // bringWireGuardUp brings the WireGuard interface up
 func bringWireGuardUp() error {
-	log.Println("Step 6: Bringing WireGuard interface up...")
+	log.Println("→ Starting WireGuard...")
 
 	if err := wgDevice.Up(); err != nil {
-		log.Printf("Failed to bring up WireGuard: %v", err)
 		return fmt.Errorf("failed to bring up: %w", err)
 	}
 
+	log.Println("✓ WireGuard is UP")
 	return nil
+}
+
+// waitForHandshake waits for the WireGuard handshake to complete
+func waitForHandshake() {
+	log.Println("→ Waiting for WireGuard handshake...")
+	log.Println("   (Make sure the server is running first!)")
+
+	// Give WireGuard time to complete the handshake
+	// The handshake involves:
+	// 1. Browser sends initiation packet via DERP
+	// 2. Server responds via DERP
+	// 3. Both sides derive session keys
+	// In WASM with DERP relay, this can take 5-10 seconds
+	for i := 0; i < 8; i++ {
+		time.Sleep(1 * time.Second)
+		if i == 3 {
+			log.Println("   Still waiting... (handshake packets traveling via DERP)")
+		}
+	}
+
+	log.Println("✓ Handshake wait complete")
 }
 
 // printSuccessMessage prints the success message after WireGuard is up
 func printSuccessMessage() {
 	log.Println("")
-	log.Println("🎉 SUCCESS! Full connection established!")
-	log.Println("─────────────────────────────────────────")
-	log.Printf("  Local IP:    %s", browserIP)
-	log.Printf("  Peer IP:     %s", serverIP)
-	log.Printf("  DERP:        %s", derpURL)
-	log.Printf("  Transport:   WebSocket")
-	log.Println("─────────────────────────────────────────")
+	log.Println("🎉 Tunnel ready!")
+	log.Printf("  Local: %s → Peer: %s", browserIP, serverIP)
+	log.Printf("  Transport: DERP via WebSocket")
 	log.Println("")
-	log.Println("✓ WireGuard is UP and connected via DERP!")
-	log.Println("  Architecture: WireGuard ← DerpBind (direct) → WebSocket → DERP")
-	log.Println("  (Just like Tailscale does in WASM!)")
+	log.Println("You can now use fetchHTTP() or pingPeer() to test the tunnel")
 }
 
 // errorResponse creates a standard error response for JavaScript
@@ -298,8 +318,6 @@ func getStatus(this js.Value, args []js.Value) interface{} {
 
 // pingPeer sends an ICMP ping through the WireGuard tunnel
 func pingPeer(this js.Value, args []js.Value) interface{} {
-	log.Println("Attempting to ping peer through WireGuard tunnel...")
-
 	if tnet == nil {
 		return map[string]interface{}{
 			"success": false,
@@ -307,14 +325,11 @@ func pingPeer(this js.Value, args []js.Value) interface{} {
 		}
 	}
 
-	// Use the userspace network stack to dial
-	// For ICMP ping, we'll actually use a simple TCP connection test for now
-	// (ICMP requires raw sockets which are complex in userspace)
-	log.Printf("Attempting to connect to %s:80...", serverIP)
+	log.Printf("→ Testing connection to %s:80...", serverIP)
 
 	conn, err := tnet.DialContext(context.Background(), "tcp", serverIP+":80")
 	if err != nil {
-		log.Printf("Failed to connect: %v", err)
+		log.Printf("✗ Connection failed: %v", err)
 		return map[string]interface{}{
 			"success": false,
 			"error":   fmt.Sprintf("Connection failed: %v", err),
@@ -322,19 +337,17 @@ func pingPeer(this js.Value, args []js.Value) interface{} {
 	}
 	defer conn.Close()
 
-	log.Println("✓ TCP connection successful!")
+	log.Println("✓ Connection successful!")
 
 	return map[string]interface{}{
 		"success": true,
-		"message": fmt.Sprintf("Successfully connected to %s:80 through WireGuard tunnel", serverIP),
+		"message": fmt.Sprintf("Successfully connected to %s:80", serverIP),
 		"bytes":   0,
 	}
 }
 
 // fetchHTTP makes an HTTP request through the WireGuard tunnel
 func fetchHTTP(this js.Value, args []js.Value) interface{} {
-	log.Println("Fetching HTTP through WireGuard tunnel...")
-
 	if tnet == nil {
 		return map[string]interface{}{
 			"success": false,
@@ -342,7 +355,9 @@ func fetchHTTP(this js.Value, args []js.Value) interface{} {
 		}
 	}
 
-	// Create HTTP client using the userspace network stack
+	url := fmt.Sprintf("http://%s/", serverIP)
+	log.Printf("→ Fetching %s...", url)
+
 	httpClient := &http.Client{
 		Transport: &http.Transport{
 			DialContext: tnet.DialContext,
@@ -350,12 +365,9 @@ func fetchHTTP(this js.Value, args []js.Value) interface{} {
 		Timeout: 10 * time.Second,
 	}
 
-	url := fmt.Sprintf("http://%s/", serverIP)
-	log.Printf("Fetching: %s", url)
-
 	resp, err := httpClient.Get(url)
 	if err != nil {
-		log.Printf("HTTP request failed: %v", err)
+		log.Printf("✗ Request failed: %v", err)
 		return map[string]interface{}{
 			"success": false,
 			"error":   fmt.Sprintf("HTTP request failed: %v", err),
@@ -365,14 +377,13 @@ func fetchHTTP(this js.Value, args []js.Value) interface{} {
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		log.Printf("Failed to read response body: %v", err)
 		return map[string]interface{}{
 			"success": false,
 			"error":   fmt.Sprintf("Failed to read body: %v", err),
 		}
 	}
 
-	log.Printf("✓ HTTP response received! Status: %s, Body length: %d bytes", resp.Status, len(body))
+	log.Printf("✓ Received %s (%d bytes)", resp.Status, len(body))
 
 	return map[string]interface{}{
 		"success":    true,
@@ -392,139 +403,4 @@ func formatHeaders(h http.Header) map[string]string {
 		}
 	}
 	return result
-}
-
-// testDerpOnly tests DERP communication without WireGuard
-// This bypasses WireGuard to isolate whether issues are in DERP/WebSocket or WireGuard layer
-func testDerpOnly(this js.Value, args []js.Value) interface{} {
-	log.Println("========================================")
-	log.Println("[TEST] DERP-only communication test")
-	log.Println("[TEST] This bypasses WireGuard to test Gateway + DERP directly")
-	log.Println("========================================")
-
-	// Step 1: Create userspace network stack
-	log.Printf("Step 1: Creating userspace network stack on %s...", browserIP)
-	tunDev, tnetLocal, err := netstack.CreateNetTUN(
-		[]netip.Addr{netip.MustParseAddr(browserIP)},
-		[]netip.Addr{netip.MustParseAddr(dnsIP)},
-		1420, // MTU
-	)
-	if err != nil {
-		log.Printf("Failed to create TUN: %v", err)
-		return map[string]interface{}{
-			"success": false,
-			"error":   fmt.Sprintf("Failed to create TUN: %v", err),
-		}
-	}
-	_ = tunDev // Not used in DERP-only test
-	tnet = tnetLocal
-	log.Println("✓ TUN device created")
-
-	// Step 2: Start the Spanza gateway
-	log.Println("Step 2: Starting Spanza gateway...")
-
-	gatewayUDPAddr := &net.UDPAddr{
-		IP:   net.IPv4zero,
-		Port: gatewayPort,
-	}
-	gatewayUDPConn, err := tnet.ListenUDP(gatewayUDPAddr)
-	if err != nil {
-		log.Printf("Failed to create gateway UDP listener: %v", err)
-		return map[string]interface{}{
-			"success": false,
-			"error":   fmt.Sprintf("Failed to create gateway: %v", err),
-		}
-	}
-
-	// Start gateway in goroutine
-	go func() {
-		cfg := gateway.Config{
-			Prefix:          "[gateway]",
-			DerpURL:         derpURL,
-			PrivKeyStr:      browserDERPPrivate,
-			RemotePubKeyStr: serverDERPPublic,
-			WGEndpoint:      fmt.Sprintf("%s:%d", browserIP, wgPort), // Packets will be sent here
-			Verbose:         true,
-		}
-		if err := gateway.Run(ctx, cfg, gatewayUDPConn); err != nil {
-			log.Printf("[gateway] Error: %v", err)
-		}
-	}()
-
-	log.Println("✓ Gateway started")
-
-	// Step 3: Create a simple UDP socket to send/receive test packets
-	log.Println("Step 3: Creating test UDP socket...")
-
-	testUDPAddr := &net.UDPAddr{
-		IP:   net.ParseIP(browserIP),
-		Port: wgPort, // Use WireGuard port for testing
-	}
-	testUDPConn, err := tnet.ListenUDP(testUDPAddr)
-	if err != nil {
-		log.Printf("Failed to create test UDP socket: %v", err)
-		return map[string]interface{}{
-			"success": false,
-			"error":   fmt.Sprintf("Failed to create test socket: %v", err),
-		}
-	}
-
-	log.Printf("✓ Test UDP socket created on %s:%d", browserIP, wgPort)
-
-	// Step 4: Start receive loop in goroutine
-	receivedPackets := make(chan string, 10)
-	go func() {
-		buf := make([]byte, 2048)
-		for {
-			n, addr, err := testUDPConn.ReadFrom(buf)
-			if err != nil {
-				log.Printf("[test] UDP read error: %v", err)
-				return
-			}
-			data := string(buf[:n])
-			log.Printf("[test] ✓ Received %d bytes from %s: %q", n, addr, data)
-			receivedPackets <- data
-		}
-	}()
-
-	// Step 5: Send test packets periodically
-	log.Println("Step 4: Sending test packets through gateway...")
-
-	gatewayAddr := &net.UDPAddr{
-		IP:   net.ParseIP(browserIP),
-		Port: gatewayPort,
-	}
-
-	for i := 1; i <= 5; i++ {
-		msg := fmt.Sprintf("PING-%d", i)
-		n, err := testUDPConn.WriteTo([]byte(msg), gatewayAddr)
-		if err != nil {
-			log.Printf("[test] Failed to send packet %d: %v", i, err)
-		} else {
-			log.Printf("[test] → Sent packet %d: %q (%d bytes)", i, msg, n)
-		}
-
-		// Wait a bit and check for responses
-		time.Sleep(1 * time.Second)
-
-		// Check if we received anything
-		select {
-		case received := <-receivedPackets:
-			log.Printf("[test] ✓ SUCCESS! Received echo: %q", received)
-		default:
-			log.Printf("[test] ⚠ No response received yet for packet %d", i)
-		}
-	}
-
-	log.Println("")
-	log.Println("========================================")
-	log.Println("[TEST] DERP-only test completed")
-	log.Println("[TEST] Check logs above for send/receive results")
-	log.Println("========================================")
-	log.Println("")
-
-	return map[string]interface{}{
-		"success": true,
-		"message": "DERP-only test completed - check console logs",
-	}
 }

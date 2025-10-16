@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/netip"
 	"sync"
+	"time"
 
 	"golang.zx2c4.com/wireguard/conn"
 	"tailscale.com/derp"
@@ -31,8 +32,8 @@ type DerpBind struct {
 	cancel context.CancelFunc
 
 	// Mutex protects closed state and receive loop state
-	mu            sync.Mutex
-	closed        bool
+	mu              sync.Mutex
+	closed          bool
 	recvLoopStarted bool // Track if receive loop has been started
 }
 
@@ -52,12 +53,12 @@ type DerpEndpoint struct {
 
 var _ conn.Endpoint = (*DerpEndpoint)(nil)
 
-func (e *DerpEndpoint) ClearSrc()             {}
-func (e *DerpEndpoint) SrcToString() string   { return e.publicKey.ShortString() }
-func (e *DerpEndpoint) SrcIP() netip.Addr     { return netip.Addr{} }
-func (e *DerpEndpoint) DstToString() string   { return e.publicKey.ShortString() }
-func (e *DerpEndpoint) DstIP() netip.Addr     { return netip.Addr{} }
-func (e *DerpEndpoint) DstToBytes() []byte    { return e.publicKey.AppendTo(nil) }
+func (e *DerpEndpoint) ClearSrc()           {}
+func (e *DerpEndpoint) SrcToString() string { return e.publicKey.ShortString() }
+func (e *DerpEndpoint) SrcIP() netip.Addr   { return netip.Addr{} }
+func (e *DerpEndpoint) DstToString() string { return e.publicKey.ShortString() }
+func (e *DerpEndpoint) DstIP() netip.Addr   { return netip.Addr{} }
+func (e *DerpEndpoint) DstToBytes() []byte  { return e.publicKey.AppendTo(nil) }
 
 // NewDerpBind creates a new DERP-based conn.Bind.
 //
@@ -97,9 +98,14 @@ func (b *DerpBind) Open(port uint16) ([]conn.ReceiveFunc, uint16, error) {
 
 	log.Println("[derpbind] Opening DERP bind...")
 
-	// NOTE: We DON'T start the receive loop here!
-	// We'll start it on the first Send(), after the DERP connection is established.
-	// This avoids the race condition where Recv() tries to connect before Send() does.
+	// Start receive loop immediately for WASM compatibility
+	// WASM has different goroutine scheduling, so we need the loop running
+	// before any sends happen to ensure proper message handling
+	if !b.recvLoopStarted {
+		b.recvLoopStarted = true
+		log.Println("[derpbind] Starting receive loop immediately (WASM compatibility)")
+		go b.receiveLoop()
+	}
 
 	// Return a single receive function (DERP only, no UDP)
 	// WireGuard will call this function to receive packets
@@ -107,7 +113,7 @@ func (b *DerpBind) Open(port uint16) ([]conn.ReceiveFunc, uint16, error) {
 
 	// Return fake port number (like MagicSock does for WASM)
 	// WireGuard requires a port number but we don't use UDP
-	log.Println("[derpbind] ✓ DERP bind opened (receive loop will start on first send)")
+	log.Println("[derpbind] ✓ DERP bind opened with receive loop running")
 	return fns, 12345, nil
 }
 
@@ -136,16 +142,7 @@ func (b *DerpBind) Send(buffs [][]byte, ep conn.Endpoint) error {
 		b.mu.Unlock()
 		return net.ErrClosed
 	}
-
-	// Start receive loop on first send (after DERP connection is established by Send)
-	if !b.recvLoopStarted {
-		b.recvLoopStarted = true
-		b.mu.Unlock()
-		log.Println("[derpbind] First send - starting receive loop after DERP connection established")
-		go b.receiveLoop()
-	} else {
-		b.mu.Unlock()
-	}
+	b.mu.Unlock()
 
 	// Send each packet via DERP
 	for _, buff := range buffs {
@@ -156,11 +153,9 @@ func (b *DerpBind) Send(buffs [][]byte, ep conn.Endpoint) error {
 		// Send to the remote peer via DERP
 		// This will establish the DERP WebSocket connection if not already connected
 		if err := b.derpClient.Send(b.remotePubKey, buff); err != nil {
-			log.Printf("[derpbind] Send error: %v", err)
+			// Error already logged by derpClient, just return it
 			return err
 		}
-
-		log.Printf("[derpbind] Sent %d bytes via DERP", len(buff))
 	}
 
 	return nil
@@ -206,7 +201,6 @@ func (b *DerpBind) receiveDERP(buffs [][]byte, sizes []int, eps []conn.Endpoint)
 		sizes[0] = n
 		eps[0] = &DerpEndpoint{publicKey: pkt.from}
 
-		log.Printf("[derpbind] Received %d bytes from DERP (from %s)", n, pkt.from.ShortString())
 		return 1, nil
 	}
 }
@@ -220,36 +214,62 @@ func (b *DerpBind) receiveDERP(buffs [][]byte, sizes []int, eps []conn.Endpoint)
 // - receiveDERP() reads from that channel non-blockingly
 func (b *DerpBind) receiveLoop() {
 	log.Println("[derpbind] Starting DERP receive loop...")
+	log.Println("[derpbind] Waiting for browser to initialize WebSocket...")
+
+	// In WASM, give the browser more time to fully initialize
+	// Progressive delays: start with longer wait, then retry with backoff
+	time.Sleep(2 * time.Second)
+
+	firstConnect := true
+	retryCount := 0
 
 	for {
 		select {
 		case <-b.ctx.Done():
-			log.Println("[derpbind] Receive loop stopped (context done)")
 			return
 		default:
 		}
 
-		// Receive a message from DERP (this blocks until a message arrives)
-		log.Println("[derpbind] Calling derpClient.Recv()...")
+		// Yield to the JavaScript event loop
+		time.Sleep(10 * time.Millisecond)
+
 		msg, err := b.derpClient.Recv()
 		if err != nil {
-			// Check if we're shutting down
 			select {
 			case <-b.ctx.Done():
 				return
 			default:
 			}
 
-			log.Printf("[derpbind] DERP recv error: %v", err)
-			log.Println("[derpbind] Will retry Recv() after error...")
+			retryCount++
+			if retryCount == 1 {
+				log.Printf("[derpbind] Attempting connection (retry %d)...", retryCount)
+			} else if retryCount%2 == 0 {
+				log.Printf("[derpbind] Retrying (attempt %d)...", retryCount)
+			}
+
+			// Exponential backoff after failed attempts
+			// Wait longer between retries to reduce error spam
+			if retryCount > 1 {
+				backoff := time.Duration(retryCount) * 500 * time.Millisecond
+				if backoff > 3*time.Second {
+					backoff = 3 * time.Second
+				}
+				time.Sleep(backoff)
+			}
 			continue
 		}
-		log.Printf("[derpbind] Recv() returned message type: %T", msg)
 
-		// Only handle received packets
+		// Connection succeeded
+		if firstConnect {
+			log.Printf("[derpbind] ✓ Connected to DERP after %d attempts", retryCount+1)
+			firstConnect = false
+		}
+		retryCount = 0
+
+		// Handle different DERP message types
 		switch m := msg.(type) {
 		case derp.ReceivedPacket:
-			// Clone the data (DERP client will reuse the buffer)
 			data := make([]byte, len(m.Data))
 			copy(data, m.Data)
 
@@ -258,19 +278,23 @@ func (b *DerpBind) receiveLoop() {
 				from: m.Source,
 			}
 
-			// Send to receive channel (non-blocking)
 			select {
 			case b.recvCh <- pkt:
-				log.Printf("[derpbind] Queued packet from %s (%d bytes)", m.Source.ShortString(), len(data))
+				// Only log first few packets, then be quiet
+				if firstConnect {
+					log.Printf("[derpbind] Received %d bytes from %s", len(data), m.Source.ShortString())
+				}
 			case <-b.ctx.Done():
 				return
 			default:
 				log.Println("[derpbind] WARNING: Receive queue full, dropping packet")
 			}
 
+		case derp.ServerInfoMessage:
+			log.Println("[derpbind] ✓ Received ServerInfo from DERP")
+
 		default:
-			// Ignore other message types (health, pings, etc.)
-			// DERP sends various control messages we don't need to handle
+			// Silently ignore other message types (like KeepAlive)
 		}
 	}
 }
