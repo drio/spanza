@@ -3,6 +3,9 @@ node_modules
 .env*
 *.mp4
 
+# Claude context (local only)
+claude/
+
 # Compiled binaries
 spanza
 userspace/ustest
